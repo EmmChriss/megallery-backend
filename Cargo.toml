@@ -1,0 +1,19 @@
+[package]
+name = "megallery"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1"
+serde = "1"
+axum = "0.6"
+axum-macros = "0.3"
+tokio = { version = "1", features = ["full"] }
+image = "0.24"
+sqlx = { version = "0.6", features = ["runtime-tokio-rustls", "postgres", "uuid", "macros", "migrate"] }
+uuid = { version = "1.1", features = ["serde"] }
+dotenv = "0.15"
+log = "0.4"
+env_logger = "0.9"

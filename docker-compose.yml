@@ -1,0 +1,30 @@
+version: "3"
+services:
+  megallery-backend:
+    env_file:
+    - .env
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    ports:
+      - "${SERVER_PORT}:${SERVER_PORT}"
+    depends_on:
+      - megallery-db
+    environment:
+      - "DATABASE_URL=postgresql://megallery:mega_gallery@megallery-db:5432/megallery"
+
+  megallery-db:
+    env_file:
+    - .env
+    image: postgres:12.4
+    ports:
+      - "${DATABASE_PORT}:5432"
+    environment:
+      - POSTGRES_USER=megallery
+      - POSTGRES_PASSWORD=mega_gallery
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes: 
+  pgdata:
+    name: postgres-data
