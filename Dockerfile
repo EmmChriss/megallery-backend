@@ -36,7 +36,7 @@ RUN groupadd -g 1000 megallery
 
 RUN useradd -u 1000 -g 1000 megallery
 
-WORKDIR /home/megallery/bin/
+WORKDIR /home/megallery/
 
 COPY --from=cargo-build /usr/src/megallery/target/release/megallery .
 

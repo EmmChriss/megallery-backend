@@ -7,13 +7,21 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+thiserror = "1"
+measure_time = "0.8"
+lazy_static = "1.4"
 serde = "1"
-axum = "0.6"
+rmp = "0.8"
+rmp-serde = "1"
+futures-util = "0.3"
+futures = "0.3"
+axum = { version = "0.6", features = ["multipart"] }
 axum-macros = "0.3"
 tokio = { version = "1", features = ["full"] }
 image = "0.24"
+fast_image_resize = "2.4"
 sqlx = { version = "0.6", features = ["runtime-tokio-rustls", "postgres", "uuid", "macros", "migrate"] }
-uuid = { version = "1.1", features = ["serde"] }
+uuid = { version = "1.1", features = ["serde", "v4", "fast-rng"] }
 dotenv = "0.15"
 log = "0.4"
 env_logger = "0.9"

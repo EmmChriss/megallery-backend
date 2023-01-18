@@ -1,0 +1,2 @@
+ALTER TABLE images ADD width INT NOT NULL;
+ALTER TABLE images ADD height INT NOT NULL;

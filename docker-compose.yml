@@ -12,6 +12,12 @@ services:
       - megallery-db
     environment:
       - "DATABASE_URL=postgresql://megallery:mega_gallery@megallery-db:5432/megallery"
+    volumes:
+      - type: volume
+        source: ./images
+        target: /home/megallery/images
+        volume:
+          nocopy: true
 
   megallery-db:
     env_file:
