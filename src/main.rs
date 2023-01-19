@@ -357,6 +357,8 @@ struct ImageResponse {
 	metadata: Vec<ImageResponseMetadata>,
 	width: u32,
 	height: u32,
+
+	#[serde(with = "serde_bytes")]
 	data: Vec<u8>,
 }
 
@@ -492,27 +494,16 @@ async fn get_image_data(
 		image::ImageOutputFormat::Png,
 	)?;
 
+	let response = ImageResponse {
+		metadata: resp_metadata,
+		width: img_atlas.width(),
+		height: img_atlas.height(),
+		data: image_buf,
+	};
+
 	// write it all to a byte buffer
 	let mut buf = Vec::new();
-	rmp::encode::write_map_len(&mut buf, 4)?;
-
-	// write metadata into buffer
-	rmp::encode::write_str(&mut buf, "metadata")?;
-	rmp_serde::encode::write_named(&mut buf, &resp_metadata)?;
-
-	// write data into buffer
-	rmp::encode::write_str(&mut buf, "data")?;
-
-	rmp::encode::write_bin(&mut buf, &image_buf)?;
-
-	// write dimensions
-	rmp::encode::write_str(&mut buf, "width")?;
-	rmp::encode::write_u32(&mut buf, img_atlas.width())?;
-
-	rmp::encode::write_str(&mut buf, "height")?;
-	rmp::encode::write_u32(&mut buf, img_atlas.height())?;
-
-	log::info!("{}", image_buf.len());
+	rmp_serde::encode::write_named(&mut buf, &response)?;
 
 	Ok(buf)
 }
