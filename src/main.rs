@@ -344,6 +344,7 @@ impl Image {
 
 #[derive(serde::Serialize)]
 struct ImageResponseMetadata {
+	id: sqlx::types::Uuid,
 	name: String,
 	width: u32,
 	height: u32,
@@ -363,6 +364,7 @@ struct ImageResponse {
 struct ImageRequest {
 	// name: Option<String>,
 	// name_like: Option<String>,
+	id: Option<Uuid>,
 	limit: Option<usize>,
 	width: i32,
 	height: i32,
@@ -379,29 +381,88 @@ async fn get_image_data(
 		));
 	}
 
-	// size down images until they fit the specified size
-	let mut buf_width = 0;
-	let mut buf_height = 0;
-	let mut metadata = ImageMetadata::get_all(&db).await?;
+	// query metadata
+	let mut metadata = if let Some(id) = req.id {
+		let m = ImageMetadata::get_by_id(&db, id)
+			.await?
+			.ok_or(Error::Custom(
+				StatusCode::NOT_FOUND,
+				"no such image id".into(),
+			))?;
+		vec![m]
+	} else {
+		ImageMetadata::get_all(&db).await?
+	};
+
+	// truncate metadata list if it contains too many items
+	// @TODO: add LIMIT option to query
 	if let Some(limit) = req.limit {
 		metadata.truncate(limit);
 	}
 
+	// size down images until they fit the specified size
 	for m in metadata.iter_mut() {
 		while m.width > req.width || m.height > req.height {
 			m.width /= 2;
 			m.height /= 2;
 		}
+	}
 
-		buf_width += m.width;
-		buf_height = buf_height.max(m.height);
+	// sort images by height to reduce amount of wasted space
+	metadata.sort_by_key(|m| m.height);
+
+	// approximate total image width by area
+	let total_area: u64 = metadata.iter().map(|m| m.height * m.width).sum::<i32>() as u64;
+	let row_width = f64::sqrt(total_area as f64).trunc() as u32;
+
+	// place images in row-first order
+	// allows large images to take up more space than available, growing buf_width
+	let resp_metadata: Vec<_>;
+	let mut buf_width: u32;
+	let mut buf_height: u32;
+	{
+		let mut start_x = 0u32;
+		let mut start_y = 0u32;
+		let mut row_height = 0u32;
+
+		buf_width = 0u32;
+		buf_height = 0u32;
+
+		resp_metadata = metadata
+			.into_iter()
+			.map(|m| {
+				if start_x > 0 && start_x + m.width as u32 > row_width {
+					start_x = 0;
+					start_y += row_height;
+					buf_height += row_height;
+					row_height = 0;
+				}
+				buf_width = buf_width.max(start_x + m.width as u32);
+				row_height = row_height.max(m.height as u32);
+
+				let v = ImageResponseMetadata {
+					id: m.id,
+					name: m.name,
+					width: m.width as u32,
+					height: m.height as u32,
+					x: start_x,
+					y: start_y,
+				};
+
+				start_x += m.width as u32;
+
+				v
+			})
+			.collect();
+
+		buf_height += row_height;
 	}
 
 	// construct image buffer
-	let mut img_atlas: image::RgbaImage = ImageBuffer::new(buf_width as u32, buf_height as u32);
-	let mut start_x = 0u32;
-	let mut resp_metadata = Vec::new();
-	for m in metadata.iter() {
+	// copy resized images into it
+	// @TODO: parallelize
+	let mut img_atlas: image::RgbaImage = ImageBuffer::new(buf_width, buf_height);
+	for m in resp_metadata.iter() {
 		let image_entry =
 			match ImageFile::get_by_id(&db, m.id, m.width as u32, m.height as u32).await? {
 				None => continue, // @TODO: handle missing data
@@ -421,20 +482,15 @@ async fn get_image_data(
 		let img = ImageReader::with_format(reader, image::ImageFormat::Png).decode()?;
 
 		// copy image into atlas buffer
-		image::imageops::replace(&mut img_atlas, &img, start_x as i64, 0);
-
-		// gather metadata
-		resp_metadata.push(ImageResponseMetadata {
-			name: m.name.clone(),
-			width: img.width(),
-			height: img.height(),
-			x: start_x,
-			y: 0,
-		});
-
-		// increment starting offset
-		start_x += m.width as u32;
+		image::imageops::replace(&mut img_atlas, &img, m.x as i64, m.y as i64);
 	}
+
+	// write image atlas into buffer
+	let mut image_buf = Vec::new();
+	img_atlas.write_to(
+		&mut Cursor::new(&mut image_buf),
+		image::ImageOutputFormat::Png,
+	)?;
 
 	// write it all to a byte buffer
 	let mut buf = Vec::new();
@@ -446,12 +502,6 @@ async fn get_image_data(
 
 	// write data into buffer
 	rmp::encode::write_str(&mut buf, "data")?;
-
-	let mut image_buf = Vec::new();
-	img_atlas.write_to(
-		&mut Cursor::new(&mut image_buf),
-		image::ImageOutputFormat::Png,
-	)?;
 
 	rmp::encode::write_bin(&mut buf, &image_buf)?;
 
