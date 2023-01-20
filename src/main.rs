@@ -312,6 +312,13 @@ impl ImageMetadata {
 			.await
 	}
 
+	pub async fn get_all_with_limit(db: &Db, limit: u32) -> sqlx::Result<Vec<Self>> {
+		sqlx::query_as("select id, name, width, height from images limit $1")
+			.bind(limit as i64)
+			.fetch_all(db)
+			.await
+	}
+
 	pub async fn get_by_id(db: &Db, id: sqlx::types::Uuid) -> sqlx::Result<Option<Self>> {
 		sqlx::query_as("select * from images where id = $1")
 			.bind(id)
@@ -367,7 +374,7 @@ struct ImageRequest {
 	// name: Option<String>,
 	// name_like: Option<String>,
 	id: Option<Uuid>,
-	limit: Option<usize>,
+	limit: Option<u32>,
 	width: i32,
 	height: i32,
 }
@@ -383,24 +390,17 @@ async fn get_image_data(
 		));
 	}
 
-	// query metadata
-	let mut metadata = if let Some(id) = req.id {
-		let m = ImageMetadata::get_by_id(&db, id)
+	// dispatch metadata query based on request
+	let mut metadata = match (req.limit, req.id) {
+		(_, Some(id)) => vec![ImageMetadata::get_by_id(&db, id)
 			.await?
 			.ok_or(Error::Custom(
 				StatusCode::NOT_FOUND,
 				"no such image id".into(),
-			))?;
-		vec![m]
-	} else {
-		ImageMetadata::get_all(&db).await?
+			))?],
+		(Some(limit), _) => ImageMetadata::get_all_with_limit(&db, limit).await?,
+		(_, _) => ImageMetadata::get_all(&db).await?,
 	};
-
-	// truncate metadata list if it contains too many items
-	// @TODO: add LIMIT option to query
-	if let Some(limit) = req.limit {
-		metadata.truncate(limit);
-	}
 
 	// size down images until they fit the specified size
 	for m in metadata.iter_mut() {
@@ -411,7 +411,9 @@ async fn get_image_data(
 	}
 
 	// sort images by height to reduce amount of wasted space
-	metadata.sort_by_key(|m| m.height);
+	// reverse order helps the layout generator below to place images with the largest widths first
+	// since this process takes only one pass, this makes it more efficient in edge cases
+	metadata.sort_by_key(|m| -m.height);
 
 	// approximate total image width by area
 	let total_area: u64 = metadata.iter().map(|m| m.height * m.width).sum::<i32>() as u64;
@@ -427,13 +429,14 @@ async fn get_image_data(
 		let mut start_y = 0u32;
 		let mut row_height = 0u32;
 
-		buf_width = 0u32;
+		buf_width = row_width;
 		buf_height = 0u32;
 
 		resp_metadata = metadata
 			.into_iter()
 			.map(|m| {
-				if start_x > 0 && start_x + m.width as u32 > row_width {
+				// allow placing any sized image on start of the row
+				if start_x > 0 && start_x + m.width as u32 > buf_width {
 					start_x = 0;
 					start_y += row_height;
 					buf_height += row_height;
@@ -460,50 +463,88 @@ async fn get_image_data(
 		buf_height += row_height;
 	}
 
-	// construct image buffer
-	// copy resized images into it
-	// @TODO: parallelize
+	// construct image buffer and copy resized images into it
 	let mut img_atlas: image::RgbaImage = ImageBuffer::new(buf_width, buf_height);
-	for m in resp_metadata.iter() {
-		let image_entry =
-			match ImageFile::get_by_id(&db, m.id, m.width as u32, m.height as u32).await? {
-				None => continue, // @TODO: handle missing data
-				Some(s) => s,
-			};
+	{
+		measure_time::info_time!(
+			"placing {} images on an image atlas of {}x{}",
+			resp_metadata.len(),
+			img_atlas.width(),
+			img_atlas.height()
+		);
 
-		// load and resize image to the given bounds
-		let mut path = PathBuf::new();
-		path.push(IMAGES_PATH);
-		path.push(&image_entry.file_name);
+		let img_atlas_mutex = Arc::new(futures::lock::Mutex::new(&mut img_atlas));
+		let iter_future = resp_metadata
+			.iter()
+			.map(|m| (m, img_atlas_mutex.clone(), db.clone()))
+			.map(|(m, image_atlas, db)| async move {
+				// load image entry from db
+				let image_entry =
+					match ImageFile::get_by_id(&db, m.id, m.width as u32, m.height as u32).await? {
+						None => return Ok::<(), Error>(()), // @TODO handle missing image entry
+						Some(s) => s,
+					};
 
-		let file = match File::open(&path) {
-			Ok(o) => o,
-			Err(_) => continue, // @TODO: handle missing files
-		};
-		let reader = BufReader::new(file);
-		let img = ImageReader::with_format(reader, image::ImageFormat::Png).decode()?;
+				// load and resize image to the given bounds
+				let mut path = PathBuf::new();
+				path.push(IMAGES_PATH);
+				path.push(&image_entry.file_name);
 
-		// copy image into atlas buffer
-		image::imageops::replace(&mut img_atlas, &img, m.x as i64, m.y as i64);
+				// read file in background task
+				let img = tokio::task::spawn_blocking(move || {
+					let file = File::open(&path).ok()?; // @TODO: handle open error
+					let reader = BufReader::new(file);
+					let img = ImageReader::with_format(reader, image::ImageFormat::Png)
+						.decode()
+						.ok()?;
+					return Some(img);
+				})
+				.await
+				.map_err(|_| Error::GenericInternalError)?
+				.ok_or(Error::GenericInternalError)?;
+
+				// lock underlying data and write to it
+				let mut img_atlas = image_atlas.lock().await;
+
+				// copy image into atlas buffer
+				image::imageops::replace(*img_atlas, &img, m.x as i64, m.y as i64);
+
+				Ok(())
+			});
+
+		futures_util::future::try_join_all(iter_future).await?;
 	}
 
-	// write image atlas into buffer
 	let mut image_buf = Vec::new();
-	img_atlas.write_to(
-		&mut Cursor::new(&mut image_buf),
-		image::ImageOutputFormat::Png,
-	)?;
+	{
+		measure_time::info_time!(
+			"encoding image atlas of {}x{}",
+			img_atlas.width(),
+			img_atlas.height()
+		);
 
-	let response = ImageResponse {
-		metadata: resp_metadata,
-		width: img_atlas.width(),
-		height: img_atlas.height(),
-		data: image_buf,
-	};
+		// write image atlas into buffer
+		img_atlas.write_to(
+			&mut Cursor::new(&mut image_buf),
+			image::ImageOutputFormat::Jpeg(255),
+		)?;
+	}
 
-	// write it all to a byte buffer
-	let mut buf = Vec::new();
-	rmp_serde::encode::write_named(&mut buf, &response)?;
+	let mut buf: Vec<_>;
+	{
+		measure_time::info_time!("serialization of {} elements", resp_metadata.len(),);
+
+		let response = ImageResponse {
+			metadata: resp_metadata,
+			width: img_atlas.width(),
+			height: img_atlas.height(),
+			data: image_buf,
+		};
+
+		// write it all to a byte buffer
+		buf = Vec::new();
+		rmp_serde::encode::write_named(&mut buf, &response)?;
+	}
 
 	Ok(buf)
 }

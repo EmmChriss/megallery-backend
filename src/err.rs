@@ -34,6 +34,9 @@ pub enum Error {
 
 	#[error("MessagePack serializer error: {0}")]
 	MessagePackSerializerError(#[from] rmp_serde::encode::Error),
+
+	#[error("generic error")]
+	GenericInternalError,
 }
 
 impl IntoResponse for Error {
