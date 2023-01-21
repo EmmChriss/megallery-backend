@@ -18,6 +18,7 @@ use std::{
 	path::{Path, PathBuf},
 	sync::Arc,
 };
+use tower_http::compression::CompressionLayer;
 use uuid::Uuid;
 
 type Db = sqlx::postgres::PgPool;
@@ -69,7 +70,8 @@ async fn main() {
 	let app = axum::Router::new()
 		.route("/images", get(get_image_metadata).post(upload_image))
 		.route("/images/data", get(get_image_data))
-		.layer(state);
+		.layer(state)
+		.layer(CompressionLayer::new());
 
 	// start built-in server
 	let addr = SocketAddr::new(addr.parse().unwrap(), port.parse().unwrap());
@@ -86,7 +88,7 @@ struct NewImage {
 }
 
 impl NewImage {
-	pub async fn insert_one(self, db: &Db) -> Result<ImageMetadata, Error> {
+	pub async fn insert_one(self, db: &Db) -> Result<Image, Error> {
 		let id = Uuid::new_v4();
 
 		sqlx::query("insert into images values ($1, $2, $3, $4)")
@@ -97,7 +99,7 @@ impl NewImage {
 			.execute(db)
 			.await?;
 
-		Ok(ImageMetadata {
+		Ok(Image {
 			id,
 			name: self.name,
 			width: self.width as i32,
@@ -177,7 +179,7 @@ async fn save_image(db: &Db, buf: &[u8], width: u32, height: u32, id: Uuid) -> R
 async fn upload_image(
 	Extension(db): DbExtension,
 	mut req: axum::extract::Multipart,
-) -> Result<Json<ImageMetadata>> {
+) -> Result<Json<Image>> {
 	measure_time::debug_time!("responding");
 
 	// read multipart data
@@ -298,14 +300,14 @@ async fn upload_image(
 }
 
 #[derive(sqlx::FromRow, serde::Serialize, Default)]
-struct ImageMetadata {
+struct Image {
 	id: sqlx::types::Uuid,
 	name: String,
 	width: i32,
 	height: i32,
 }
 
-impl ImageMetadata {
+impl Image {
 	pub async fn get_all(db: &Db) -> sqlx::Result<Vec<Self>> {
 		sqlx::query_as("select id, name, width, height from images")
 			.fetch_all(db)
@@ -325,28 +327,20 @@ impl ImageMetadata {
 			.fetch_optional(db)
 			.await
 	}
-}
 
-async fn get_image_metadata(Extension(db): DbExtension) -> Result<Json<Vec<ImageMetadata>>> {
-	Ok(Json(ImageMetadata::get_all(&db).await?))
-}
-
-#[derive(sqlx::FromRow, serde::Serialize, Default)]
-struct Image {
-	id: Uuid,
-	name: String,
-	image: Vec<u8>,
-	width: i32,
-	height: i32,
-}
-
-impl Image {
-	pub async fn get_by_id(db: &Db, id: Uuid) -> sqlx::Result<Option<Self>> {
-		sqlx::query_as("select * from images where id = $1")
-			.bind(id)
-			.fetch_optional(db)
+	pub async fn get_by_id_list(
+		db: &Db,
+		id_list: Vec<sqlx::types::Uuid>,
+	) -> sqlx::Result<Vec<Self>> {
+		sqlx::query_as("select * from images where id in $1")
+			.bind(id_list)
+			.fetch_all(db)
 			.await
 	}
+}
+
+async fn get_image_metadata(Extension(db): DbExtension) -> Result<Json<Vec<Image>>> {
+	Ok(Json(Image::get_all(&db).await?))
 }
 
 #[derive(serde::Serialize)]
@@ -374,6 +368,7 @@ struct ImageRequest {
 	// name: Option<String>,
 	// name_like: Option<String>,
 	id: Option<Uuid>,
+	id_list: Option<Vec<Uuid>>,
 	limit: Option<u32>,
 	width: i32,
 	height: i32,
@@ -381,7 +376,7 @@ struct ImageRequest {
 
 async fn get_image_data(
 	Extension(db): DbExtension,
-	Query(req): Query<ImageRequest>,
+	Json(req): Json<ImageRequest>,
 ) -> Result<impl IntoResponse> {
 	if req.width <= 1 || req.height <= 1 {
 		return Err(Error::Custom(
@@ -391,15 +386,14 @@ async fn get_image_data(
 	}
 
 	// dispatch metadata query based on request
-	let mut metadata = match (req.limit, req.id) {
-		(_, Some(id)) => vec![ImageMetadata::get_by_id(&db, id)
-			.await?
-			.ok_or(Error::Custom(
-				StatusCode::NOT_FOUND,
-				"no such image id".into(),
-			))?],
-		(Some(limit), _) => ImageMetadata::get_all_with_limit(&db, limit).await?,
-		(_, _) => ImageMetadata::get_all(&db).await?,
+	let mut metadata = match (req.limit, req.id, req.id_list) {
+		(_, Some(id), _) => vec![Image::get_by_id(&db, id).await?.ok_or(Error::Custom(
+			StatusCode::NOT_FOUND,
+			"no such image id".into(),
+		))?],
+		(_, _, Some(id_list)) => Image::get_by_id_list(&db, id_list).await?,
+		(Some(limit), _, _) => Image::get_all_with_limit(&db, limit).await?,
+		(_, _, _) => Image::get_all(&db).await?,
 	};
 
 	// size down images until they fit the specified size
@@ -411,8 +405,6 @@ async fn get_image_data(
 	}
 
 	// sort images by height to reduce amount of wasted space
-	// reverse order helps the layout generator below to place images with the largest widths first
-	// since this process takes only one pass, this makes it more efficient in edge cases
 	metadata.sort_by_key(|m| -m.height);
 
 	// approximate total image width by area
@@ -526,7 +518,7 @@ async fn get_image_data(
 		// write image atlas into buffer
 		img_atlas.write_to(
 			&mut Cursor::new(&mut image_buf),
-			image::ImageOutputFormat::Jpeg(255),
+			image::ImageOutputFormat::Png,
 		)?;
 	}
 
