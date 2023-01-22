@@ -2,7 +2,11 @@ mod err;
 use err::{Error, Result};
 
 use axum::{
-	self, extract::Query, http::StatusCode, response::IntoResponse, routing::get, Extension, Json,
+	self,
+	http::StatusCode,
+	response::IntoResponse,
+	routing::{get, post},
+	Extension, Json,
 };
 use dotenv;
 use env_logger;
@@ -25,6 +29,20 @@ type Db = sqlx::postgres::PgPool;
 type DbExtension = Extension<Arc<Db>>;
 
 static IMAGES_PATH: &str = "./images";
+
+fn uuid_to_string(id: &Uuid) -> String {
+	let mut id_buf = Uuid::encode_buffer();
+	let id_str = id.hyphenated().encode_lower(&mut id_buf);
+	return id_str.to_string();
+}
+
+fn uuid_to_string_serialize<S>(id: &Uuid, ser: S) -> Result<S::Ok, S::Error>
+where
+	S: serde::Serializer,
+{
+	let id_str = uuid_to_string(id);
+	ser.serialize_str(&id_str)
+}
 
 lazy_static! {
 	static ref RESIZE_CPU_EXTENSION: resize::CpuExtensions = {
@@ -69,7 +87,7 @@ async fn main() {
 	let state: DbExtension = Extension(Arc::new(pool));
 	let app = axum::Router::new()
 		.route("/images", get(get_image_metadata).post(upload_image))
-		.route("/images/data", get(get_image_data))
+		.route("/images/data", post(get_image_data))
 		.layer(state)
 		.layer(CompressionLayer::new());
 
@@ -147,9 +165,7 @@ impl ImageFile {
 
 async fn save_image(db: &Db, buf: &[u8], width: u32, height: u32, id: Uuid) -> Result<(), Error> {
 	// Write destination image as PNG-file
-	let mut id_buf = Uuid::encode_buffer();
-	let id_str = id.hyphenated().encode_lower(&mut id_buf);
-
+	let id_str = uuid_to_string(&id);
 	let file_name = format!("{}/{}x{}.png", id_str, width, height);
 
 	let mut path = PathBuf::new();
@@ -343,10 +359,25 @@ async fn get_image_metadata(Extension(db): DbExtension) -> Result<Json<Vec<Image
 	Ok(Json(Image::get_all(&db).await?))
 }
 
+#[derive(serde::Deserialize)]
+struct ImageDataRequest {
+	// filter
+	// name_exact: Option<String>,
+	// name_like: Option<String>,
+	id: Option<Uuid>,
+	id_list: Option<Vec<Uuid>>,
+	limit: Option<u32>,
+
+	// params
+	icon_max_width: u32,
+	icon_max_height: u32,
+	atlas_max_area: u32,
+}
+
 #[derive(serde::Serialize)]
-struct ImageResponseMetadata {
-	id: sqlx::types::Uuid,
-	name: String,
+struct AtlasMapping {
+	#[serde(serialize_with = "uuid_to_string_serialize")]
+	id: Uuid,
 	width: u32,
 	height: u32,
 	x: u32,
@@ -354,31 +385,17 @@ struct ImageResponseMetadata {
 }
 
 #[derive(serde::Serialize)]
-struct ImageResponse {
-	metadata: Vec<ImageResponseMetadata>,
-	width: u32,
-	height: u32,
-
+struct ImageDataResponse {
 	#[serde(with = "serde_bytes")]
 	data: Vec<u8>,
-}
-
-#[derive(serde::Deserialize)]
-struct ImageRequest {
-	// name: Option<String>,
-	// name_like: Option<String>,
-	id: Option<Uuid>,
-	id_list: Option<Vec<Uuid>>,
-	limit: Option<u32>,
-	width: i32,
-	height: i32,
+	mapping: Vec<AtlasMapping>,
 }
 
 async fn get_image_data(
 	Extension(db): DbExtension,
-	Json(req): Json<ImageRequest>,
+	Json(req): Json<ImageDataRequest>,
 ) -> Result<impl IntoResponse> {
-	if req.width <= 1 || req.height <= 1 {
+	if req.atlas_max_area <= 1 {
 		return Err(Error::Custom(
 			StatusCode::BAD_REQUEST,
 			"bad image size".into(),
@@ -386,34 +403,58 @@ async fn get_image_data(
 	}
 
 	// dispatch metadata query based on request
-	let mut metadata = match (req.limit, req.id, req.id_list) {
+	let mut metadata = match (req.limit, req.id, &req.id_list) {
 		(_, Some(id), _) => vec![Image::get_by_id(&db, id).await?.ok_or(Error::Custom(
 			StatusCode::NOT_FOUND,
 			"no such image id".into(),
 		))?],
-		(_, _, Some(id_list)) => Image::get_by_id_list(&db, id_list).await?,
+		// (_, _, Some(id_list)) => Image::get_by_id_list(&db, id_list).await?,
 		(Some(limit), _, _) => Image::get_all_with_limit(&db, limit).await?,
 		(_, _, _) => Image::get_all(&db).await?,
 	};
 
-	// size down images until they fit the specified size
+	// temporary
+	if let Some(id_list) = req.id_list {
+		metadata = metadata
+			.into_iter()
+			.filter(|m| id_list.contains(&m.id))
+			.collect();
+	}
+
+	// size down images until they fit the specified icon size
 	for m in metadata.iter_mut() {
-		while m.width > req.width || m.height > req.height {
+		while m.width as u32 > req.icon_max_width || m.height as u32 > req.icon_max_height {
 			m.width /= 2;
 			m.height /= 2;
+		}
+	}
+
+	// approximate total atlas area
+	let mut total_area = metadata.iter().map(|m| m.height * m.width).sum::<i32>() as u32;
+
+	let mut downsize_factor = 0;
+	while total_area > req.atlas_max_area {
+		downsize_factor += 1;
+		total_area /= 4;
+	}
+
+	if downsize_factor > 0 {
+		for m in metadata.iter_mut() {
+			for _ in 0..downsize_factor {
+				m.width /= 2;
+				m.height /= 2;
+			}
 		}
 	}
 
 	// sort images by height to reduce amount of wasted space
 	metadata.sort_by_key(|m| -m.height);
 
-	// approximate total image width by area
-	let total_area: u64 = metadata.iter().map(|m| m.height * m.width).sum::<i32>() as u64;
 	let row_width = f64::sqrt(total_area as f64).trunc() as u32;
 
 	// place images in row-first order
 	// allows large images to take up more space than available, growing buf_width
-	let resp_metadata: Vec<_>;
+	let mapping: Vec<_>;
 	let mut buf_width: u32;
 	let mut buf_height: u32;
 	{
@@ -424,7 +465,7 @@ async fn get_image_data(
 		buf_width = row_width;
 		buf_height = 0u32;
 
-		resp_metadata = metadata
+		mapping = metadata
 			.into_iter()
 			.map(|m| {
 				// allow placing any sized image on start of the row
@@ -437,9 +478,8 @@ async fn get_image_data(
 				buf_width = buf_width.max(start_x + m.width as u32);
 				row_height = row_height.max(m.height as u32);
 
-				let v = ImageResponseMetadata {
+				let v = AtlasMapping {
 					id: m.id,
-					name: m.name,
 					width: m.width as u32,
 					height: m.height as u32,
 					x: start_x,
@@ -460,13 +500,13 @@ async fn get_image_data(
 	{
 		measure_time::info_time!(
 			"placing {} images on an image atlas of {}x{}",
-			resp_metadata.len(),
+			mapping.len(),
 			img_atlas.width(),
 			img_atlas.height()
 		);
 
 		let img_atlas_mutex = Arc::new(futures::lock::Mutex::new(&mut img_atlas));
-		let iter_future = resp_metadata
+		let iter_future = mapping
 			.iter()
 			.map(|m| (m, img_atlas_mutex.clone(), db.clone()))
 			.map(|(m, image_atlas, db)| async move {
@@ -524,12 +564,10 @@ async fn get_image_data(
 
 	let mut buf: Vec<_>;
 	{
-		measure_time::info_time!("serialization of {} elements", resp_metadata.len(),);
+		measure_time::info_time!("serialization of {} elements", mapping.len(),);
 
-		let response = ImageResponse {
-			metadata: resp_metadata,
-			width: img_atlas.width(),
-			height: img_atlas.height(),
+		let response = ImageDataResponse {
+			mapping,
 			data: image_buf,
 		};
 
