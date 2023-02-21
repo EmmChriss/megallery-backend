@@ -3,6 +3,8 @@ use err::{Error, Result};
 
 use axum::{
 	self,
+	body::StreamBody,
+	extract::WebSocketUpgrade,
 	http::StatusCode,
 	response::IntoResponse,
 	routing::{get, post},
@@ -11,16 +13,22 @@ use axum::{
 use dotenv;
 use env_logger;
 use fast_image_resize as resize;
+use futures::{stream::FuturesOrdered, FutureExt, StreamExt, TryStreamExt};
 use image::{codecs::png::PngEncoder, io::Reader as ImageReader, ImageBuffer, ImageEncoder};
 use lazy_static::lazy_static;
 use log;
 use sqlx::postgres::PgPool;
 use std::{
+	cell::RefCell,
 	fs::File,
 	io::{BufReader, BufWriter, Cursor},
 	net::SocketAddr,
 	path::{Path, PathBuf},
-	sync::Arc,
+	sync::{atomic::AtomicU32, Arc},
+};
+use tokio::{
+	io::{AsyncBufRead, AsyncReadExt},
+	sync::{Mutex, RwLock},
 };
 use tower_http::compression::CompressionLayer;
 use uuid::Uuid;
@@ -29,6 +37,8 @@ type Db = sqlx::postgres::PgPool;
 type DbExtension = Extension<Arc<Db>>;
 
 static IMAGES_PATH: &str = "./images";
+
+const RESPONSE_MAX_SIZE: u64 = 512 * 1024 * 1024;
 
 fn uuid_to_string(id: &Uuid) -> String {
 	let mut id_buf = Uuid::encode_buffer();
@@ -88,6 +98,7 @@ async fn main() {
 	let app = axum::Router::new()
 		.route("/images", get(get_image_metadata).post(upload_image))
 		.route("/images/data", post(get_image_data))
+		.route("/images/data_new", post(get_image_data_for_images))
 		.layer(state)
 		.layer(CompressionLayer::new());
 
@@ -161,6 +172,26 @@ impl ImageFile {
 		.fetch_optional(db)
 		.await
 	}
+
+	pub async fn get_by_max_size(
+		db: &Db,
+		id: Uuid,
+		max_width: u32,
+		max_height: u32,
+	) -> Result<Option<Self>, sqlx::Error> {
+		sqlx::query_as(
+			"
+			SELECT * FROM image_files
+			WHERE image_id = $1 AND width <= $2 AND height <= $3
+			ORDER BY width DESC, height DESC
+			LIMIT 1",
+		)
+		.bind(id)
+		.bind(max_width as i32)
+		.bind(max_height as i32)
+		.fetch_optional(db)
+		.await
+	}
 }
 
 async fn save_image(db: &Db, buf: &[u8], width: u32, height: u32, id: Uuid) -> Result<(), Error> {
@@ -196,7 +227,7 @@ async fn upload_image(
 	Extension(db): DbExtension,
 	mut req: axum::extract::Multipart,
 ) -> Result<Json<Image>> {
-	measure_time::debug_time!("responding");
+	measure_time::warn_time!("responding");
 
 	// read multipart data
 	// @TODO: ward off duplicate values
@@ -205,7 +236,7 @@ async fn upload_image(
 	let mut name = None;
 	let mut data = None;
 	{
-		measure_time::debug_time!("receiving data");
+		measure_time::warn_time!("receiving data");
 
 		while let Some(field) = req.next_field().await? {
 			let field_name = field.name().ok_or(Error::MultipartMissingName)?;
@@ -249,7 +280,7 @@ async fn upload_image(
 	// create and save image versions
 	// @TODO: do this in a background task
 	{
-		measure_time::debug_time!("saving images");
+		measure_time::warn_time!("saving images");
 
 		let transaction = db.begin().await?;
 
@@ -283,7 +314,7 @@ async fn upload_image(
 				break;
 			}
 
-			measure_time::debug_time!(
+			measure_time::warn_time!(
 				"resizing {}x{} -> {}x{}",
 				img.width(),
 				img.height(),
@@ -547,7 +578,7 @@ async fn get_image_data(
 		futures_util::future::try_join_all(iter_future).await?;
 	}
 
-	let mut image_buf = Vec::new();
+	let mut image_buf = Vec::with_capacity((img_atlas.width() * img_atlas.height() * 4) as usize);
 	{
 		measure_time::info_time!(
 			"encoding image atlas of {}x{}",
@@ -562,7 +593,7 @@ async fn get_image_data(
 		)?;
 	}
 
-	let mut buf: Vec<_>;
+	let mut buf = Vec::with_capacity(image_buf.len() + 10000);
 	{
 		measure_time::info_time!("serialization of {} elements", mapping.len(),);
 
@@ -572,9 +603,90 @@ async fn get_image_data(
 		};
 
 		// write it all to a byte buffer
-		buf = Vec::new();
 		rmp_serde::encode::write_named(&mut buf, &response)?;
 	}
 
 	Ok(buf)
+}
+
+#[derive(serde::Deserialize, Clone, Copy)]
+struct ImageDataRequestNew {
+	id: Uuid,
+	max_width: u32,
+	max_height: u32,
+}
+
+async fn get_image_data_for_images(
+	Extension(db): DbExtension,
+	Json(req): Json<Vec<ImageDataRequestNew>>,
+) -> Result<impl IntoResponse> {
+	// TODO: find a way to select a list of ids
+	// for now, the list is manually filtered
+
+	let len = req.len();
+	let header_stream = async move {
+		let mut buf = vec![];
+		rmp::encode::write_array_len(&mut buf, len as u32)?;
+		Ok(buf)
+	}
+	.into_stream();
+
+	let counter = Arc::new(RwLock::new(0u64));
+	let counter_move = counter.clone();
+	let stream = futures::stream::iter(req)
+		.map(move |r| {
+			let db = db.clone();
+			let counter = counter_move.clone();
+			async move {
+				{
+					let count = counter.read().await;
+					if *count > RESPONSE_MAX_SIZE {
+						return Err(Error::GenericInternalError);
+					}
+				}
+
+				let mut buf = vec![];
+				let image_file =
+					match ImageFile::get_by_max_size(&db, r.id, r.max_width, r.max_height).await? {
+						Some(s) => s,
+						None => {
+							rmp::encode::write_nil(&mut buf)?;
+							return Ok(buf);
+						}
+					};
+
+				// load and resize image to the given bounds
+				let mut path = PathBuf::new();
+				path.push(IMAGES_PATH);
+				path.push(&image_file.file_name);
+
+				let file = match tokio::fs::File::open(&path).await {
+					Ok(f) => f,
+					Err(_) => {
+						rmp::encode::write_nil(&mut buf)?;
+						return Ok(buf);
+					}
+				};
+				let size = file.metadata().await?.len();
+				rmp::encode::write_bin_len(&mut buf, size as u32)?;
+
+				*counter.write().await += size;
+
+				let mut reader = tokio::io::BufReader::new(file);
+
+				reader.read_to_end(&mut buf).await?;
+
+				Ok(buf)
+			}
+		})
+		.buffered(128);
+
+	let count = *counter.read().await;
+	if count > RESPONSE_MAX_SIZE {
+		return Err(Error::PayloadTooLarge(count));
+	}
+
+	let stream_body = StreamBody::new(header_stream.chain(stream));
+
+	Ok(stream_body)
 }

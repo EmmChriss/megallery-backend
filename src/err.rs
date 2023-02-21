@@ -35,6 +35,9 @@ pub enum Error {
 	#[error("MessagePack serializer error: {0}")]
 	MessagePackSerializerError(#[from] rmp_serde::encode::Error),
 
+	#[error("payload too large {0}")]
+	PayloadTooLarge(u64),
+
 	#[error("generic error")]
 	GenericInternalError,
 }
