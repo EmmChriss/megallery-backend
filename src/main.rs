@@ -5,6 +5,7 @@ mod err;
 mod metadata;
 mod upload;
 
+use atlas::AtlasTriggerExtension;
 use db::{DbExtension, Image, ImageFile};
 use err::Result;
 
@@ -22,6 +23,7 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 const IMAGES_PATH: &str = "./images";
+const STATIC_ATLAS_PATH: &str = "./images/static_atlas.msgp";
 const RESPONSE_MAX_SIZE: u64 = 512 * 1024 * 1024;
 
 fn uuid_to_string(id: &Uuid) -> String {
@@ -53,10 +55,7 @@ async fn main() {
 
 	// make sure "images" directory exists
 	let images = Path::new(IMAGES_PATH);
-	if !images
-		.try_exists()
-		.expect("could not check if ./images exists")
-	{
+	if !images.exists() {
 		std::fs::create_dir(images).expect("could not create ./images directory");
 	}
 	if !images.is_dir() {
@@ -64,15 +63,21 @@ async fn main() {
 	}
 
 	// define app routes
-	let state: DbExtension = Extension(Arc::new(pool));
+	let db_extension: DbExtension = Extension(Arc::new(pool));
+	let atlas_timer_extension: AtlasTriggerExtension = Extension(Arc::new(
+		tokio::sync::Mutex::new(atlas::AtlasTrigger::new()),
+	));
+
 	let app = axum::Router::new()
 		.route(
 			"/images",
 			get(metadata::get_image_metadata).post(upload::upload_image),
 		)
-		.route("/images/atlas", post(crate::atlas::get_atlas))
 		.route("/images/bulk", post(crate::bulk::get_images_bulk))
-		.layer(state)
+		.route("/atlases/dynamic", post(crate::atlas::get_dynamic_atlas))
+		.route("/atlases/static", get(crate::atlas::get_static_atlas))
+		.layer(db_extension)
+		.layer(atlas_timer_extension)
 		.layer(CorsLayer::permissive());
 
 	// start built-in server

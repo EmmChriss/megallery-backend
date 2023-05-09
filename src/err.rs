@@ -38,6 +38,9 @@ pub enum Error {
 	#[error("payload too large {0}")]
 	PayloadTooLarge(u64),
 
+	#[error("task join error")]
+	JoinError(#[from] tokio::task::JoinError),
+
 	#[error("generic error")]
 	GenericInternalError,
 }

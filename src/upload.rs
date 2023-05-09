@@ -1,18 +1,17 @@
-use std::{
-	fs::File,
-	io::{BufWriter, Cursor},
-	path::PathBuf,
-};
+use std::io::Cursor;
 
 use axum::{http::StatusCode, Extension, Json};
 use fast_image_resize as resize;
-use image::{codecs::jpeg::JpegEncoder, io::Reader as ImageReader, ImageEncoder};
+use image::io::Reader as ImageReader;
+use tokio::{
+	fs::File,
+	io::{AsyncWriteExt, BufWriter},
+};
 use uuid::Uuid;
 
 use crate::{
 	db::{Db, DbExtension, Image, ImageFile, NewImage},
 	err::{Error, Result},
-	uuid_to_string, IMAGES_PATH,
 };
 
 lazy_static::lazy_static! {
@@ -33,51 +32,38 @@ pub async fn save_image(
 	width: u32,
 	height: u32,
 	id: Uuid,
+	format: image::ImageFormat,
+	color: image::ColorType,
 ) -> Result<(), Error> {
 	// Write destination image as JPG-file
-	let id_str = uuid_to_string(&id);
-	let file_name = format!("{}/{}x{}.jpg", id_str, width, height);
+	let image_file = ImageFile {
+		image_id: id,
+		width,
+		height,
+		extension: format.extensions_str()[0].to_owned(),
+	};
 
-	let mut path = PathBuf::new();
-	path.push(IMAGES_PATH);
-	path.push(id_str);
-	std::fs::create_dir_all(&path)?;
-
-	path.push(format!("{}x{}", width, height));
-	path.set_extension("jpg");
-
-	let mut result_buf = BufWriter::new(File::create(&path)?);
-	JpegEncoder::new(&mut result_buf).write_image(buf, width, height, image::ColorType::Rgb8)?;
+	let path = image_file.get_path();
+	image::save_buffer_with_format(path, buf, width, height, color, format)?;
 
 	// If this succeeded, save entry in db
-	ImageFile {
-		image_id: id,
-		width: width.try_into().unwrap(),
-		height: height.try_into().unwrap(),
-		file_name,
-	}
-	.insert_one(db)
-	.await?;
+	image_file.insert_one(db).await?;
 
 	Ok(())
 }
 
-pub async fn save_image_versions(
+pub async fn save_image_thumbnails(
 	db: &Db,
 	meta: Image,
 	img: image::DynamicImage,
 ) -> Result<(), Error> {
 	measure_time::warn_time!("saving images");
 
-	// first off, save original version
-	save_image(
-		&db,
-		img.as_rgb8().unwrap(),
-		img.width(),
-		img.height(),
-		meta.id,
-	)
-	.await?;
+	// make sure format is rgb8
+	let img: image::DynamicImage = match img.as_rgb8() {
+		Some(_) => img,
+		None => img.to_rgb8().into(),
+	};
 
 	let width_ = std::num::NonZeroU32::new(img.width()).unwrap();
 	let height_ = std::num::NonZeroU32::new(img.height()).unwrap();
@@ -123,7 +109,16 @@ pub async fn save_image_versions(
 		}
 		resizer.resize(&src_image.view(), &mut dst_view).unwrap();
 
-		save_image(&db, dst_image.buffer(), width, height, meta.id).await?;
+		save_image(
+			&db,
+			dst_image.buffer(),
+			width,
+			height,
+			meta.id,
+			image::ImageFormat::Jpeg,
+			image::ColorType::Rgb8,
+		)
+		.await?;
 	}
 
 	Ok(())
@@ -164,9 +159,9 @@ pub async fn upload_image(
 	let data = data.ok_or(Error::MultipartMissingField("data".into()))?;
 
 	// read image, make sure format is correct
-	let img = ImageReader::new(Cursor::new(&data))
-		.with_guessed_format()?
-		.decode()?;
+	let img = ImageReader::new(Cursor::new(&data)).with_guessed_format()?;
+	let format = img.format();
+	let img = img.decode()?;
 
 	// construct new dto for insertion, return metadata
 	let meta = NewImage {
@@ -177,16 +172,25 @@ pub async fn upload_image(
 	.insert_one(&db)
 	.await?;
 
-	// make sure format is rgb8
-	let img: image::DynamicImage = match img.as_rgb8() {
-		Some(_) => img,
-		None => img.to_rgb8().into(),
+	// save original version without modifying anything
+	let extension = format.unwrap().extensions_str()[0].to_owned();
+	let image_file = ImageFile {
+		image_id: meta.id,
+		width: img.width(),
+		height: img.height(),
+		extension,
 	};
+	let path = image_file.get_path();
+
+	std::fs::create_dir_all(&path)?;
+	let mut writer = BufWriter::new(File::create(path).await?);
+	writer.write_all(&data).await?;
+	image_file.insert_one(&db).await?;
 
 	// create and save image versions
 	let meta_ = meta.clone();
 	tokio::spawn(async move {
-		let res = save_image_versions(&db.clone(), meta_, img).await;
+		let res = save_image_thumbnails(&db.clone(), meta_, img).await;
 		if let Err(e) = res {
 			log::error!("error during saving image versions: {}", e);
 		}

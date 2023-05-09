@@ -1,9 +1,12 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use axum::Extension;
 use uuid::Uuid;
 
-use crate::err::{Error, Result};
+use crate::{
+	err::{Error, Result},
+	IMAGES_PATH,
+};
 
 pub type Db = sqlx::postgres::PgPool;
 pub type DbExtension = Extension<Arc<Db>>;
@@ -52,10 +55,7 @@ impl Image {
 			.await
 	}
 
-	pub async fn get_by_id_list(
-		db: &Db,
-		id_list: Vec<sqlx::types::Uuid>,
-	) -> sqlx::Result<Vec<Self>> {
+	pub async fn get_by_id_list(db: &Db, id_list: &[sqlx::types::Uuid]) -> sqlx::Result<Vec<Self>> {
 		// NOTE: this code does not work as of yet, will debug later
 		// sqlx::query_as("select * from images where id in $1")
 		// 	.bind(id_list)
@@ -106,7 +106,7 @@ pub struct ImageFile {
 	pub width: u32,
 	#[sqlx(try_from = "i32")]
 	pub height: u32,
-	pub file_name: String,
+	pub extension: String,
 }
 
 impl ImageFile {
@@ -115,7 +115,7 @@ impl ImageFile {
 			.bind(self.image_id)
 			.bind(self.width as i32)
 			.bind(self.height as i32)
-			.bind(self.file_name)
+			.bind(self.extension)
 			.execute(db)
 			.await
 			.map(|_| ())
@@ -155,5 +155,15 @@ impl ImageFile {
 		.bind(max_height as i32)
 		.fetch_optional(db)
 		.await
+	}
+
+	pub fn get_path(&self) -> PathBuf {
+		let mut path = PathBuf::new();
+		path.push(IMAGES_PATH);
+		path.push(crate::uuid_to_string(&self.image_id));
+		path.push(format!("{}x{}", self.width, self.height));
+		path.set_extension(&self.extension);
+
+		return path;
 	}
 }

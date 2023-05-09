@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::StreamBody;
@@ -10,7 +9,7 @@ use uuid::Uuid;
 
 use crate::db::{DbExtension, ImageFile};
 use crate::err::{Error, Result};
-use crate::{IMAGES_PATH, RESPONSE_MAX_SIZE};
+use crate::RESPONSE_MAX_SIZE;
 
 #[derive(serde::Deserialize, Clone, Copy)]
 pub struct BulkImageRequestEntry {
@@ -65,9 +64,7 @@ pub async fn get_images_bulk(
 					};
 
 				// load and resize image to the given bounds
-				let mut path = PathBuf::new();
-				path.push(IMAGES_PATH);
-				path.push(&image_file.file_name);
+				let path = image_file.get_path();
 
 				let file = match tokio::fs::File::open(&path).await {
 					Ok(f) => f,
