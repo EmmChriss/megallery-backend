@@ -136,6 +136,7 @@ pub async fn upload_image(
 	// @TODO: write to fs while receiving
 	let mut name = None;
 	let mut data = None;
+	let mut collection_id = None;
 	{
 		measure_time::warn_time!("receiving data");
 
@@ -144,6 +145,14 @@ pub async fn upload_image(
 			match field_name {
 				"name" => name = Some(field.text().await?),
 				"data" => data = Some(field.bytes().await?),
+				"collection_id" => {
+					collection_id = Some(Uuid::try_parse(&field.text().await?).map_err(|_| {
+						Error::Custom(
+							StatusCode::BAD_REQUEST,
+							format!("collection_id: invalid uuid"),
+						)
+					})?)
+				}
 				_ => {
 					return Err(Error::Custom(
 						StatusCode::BAD_REQUEST,
@@ -168,6 +177,7 @@ pub async fn upload_image(
 		name: name.into(),
 		width: img.width(),
 		height: img.height(),
+		collection_id,
 	}
 	.insert_one(&db)
 	.await?;

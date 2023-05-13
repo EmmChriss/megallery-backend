@@ -24,9 +24,30 @@ pub async fn init(db_url: &str) -> Db {
 	pool
 }
 
+#[derive(sqlx::FromRow, serde::Serialize)]
+pub struct Collection {
+	pub id: sqlx::types::Uuid,
+	pub name: String,
+}
+
+impl Collection {
+	pub async fn get_all(db: &Db) -> sqlx::Result<Vec<Collection>> {
+		sqlx::query_as("select * from collections")
+			.fetch_all(db)
+			.await
+	}
+
+	pub async fn get_default(db: &Db) -> sqlx::Result<Collection> {
+		sqlx::query_as("select * from collections where name = 'Default'")
+			.fetch_one(db)
+			.await
+	}
+}
+
 #[derive(sqlx::FromRow, serde::Serialize, Default, Clone)]
 pub struct Image {
 	pub id: sqlx::types::Uuid,
+	pub collection_id: sqlx::types::Uuid,
 	pub name: String,
 	#[sqlx(try_from = "i32")]
 	pub width: u32,
@@ -36,13 +57,18 @@ pub struct Image {
 
 impl Image {
 	pub async fn get_all(db: &Db) -> sqlx::Result<Vec<Image>> {
-		sqlx::query_as("select id, name, width, height from images")
+		sqlx::query_as("select * from images").fetch_all(db).await
+	}
+
+	pub async fn get_all_for_collection(db: &Db, collection_id: Uuid) -> sqlx::Result<Vec<Image>> {
+		sqlx::query_as("select * from images where collection_id = $1")
+			.bind(collection_id)
 			.fetch_all(db)
 			.await
 	}
 
 	pub async fn get_all_with_limit(db: &Db, limit: u32) -> sqlx::Result<Vec<Self>> {
-		sqlx::query_as("select id, name, width, height from images limit $1")
+		sqlx::query_as("select * from images limit $1")
 			.bind(limit as i64)
 			.fetch_all(db)
 			.await
@@ -76,17 +102,24 @@ pub struct NewImage {
 	pub name: String,
 	pub width: u32,
 	pub height: u32,
+	pub collection_id: Option<sqlx::types::Uuid>,
 }
 
 impl NewImage {
 	pub async fn insert_one(self, db: &Db) -> Result<Image, Error> {
 		let id = Uuid::new_v4();
 
-		sqlx::query("insert into images values ($1, $2, $3, $4)")
+		let collection_id = match self.collection_id {
+			Some(collection_id) => collection_id,
+			None => Collection::get_default(db).await?.id,
+		};
+
+		sqlx::query("insert into images values ($1, $2, $3, $4, $5)")
 			.bind(id)
 			.bind(&self.name)
 			.bind(self.width as i32)
 			.bind(self.height as i32)
+			.bind(collection_id)
 			.execute(db)
 			.await?;
 
@@ -95,6 +128,7 @@ impl NewImage {
 			name: self.name,
 			width: self.width,
 			height: self.height,
+			collection_id,
 		})
 	}
 }

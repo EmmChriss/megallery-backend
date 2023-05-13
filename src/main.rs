@@ -69,6 +69,7 @@ async fn main() {
 	));
 
 	let app = axum::Router::new()
+		.route("/collections", get(metadata::get_collection_metadata))
 		.route(
 			"/images",
 			get(metadata::get_image_metadata).post(upload::upload_image),
