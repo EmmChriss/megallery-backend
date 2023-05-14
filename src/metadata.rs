@@ -1,27 +1,33 @@
-use axum::extract::Query;
+use axum::extract::Path;
 use axum::{Extension, Json};
 use uuid::Uuid;
 
-use crate::db::{Collection, DbExtension, Image};
+use crate::db::{Collection, DbExtension, Image, NewCollection};
 use crate::err::Result;
-
-#[derive(serde::Deserialize)]
-pub struct ImageMetadataRequestParams {
-	collection_id: Option<Uuid>,
-}
 
 pub async fn get_image_metadata(
 	Extension(db): DbExtension,
-	Query(params): Query<ImageMetadataRequestParams>,
+	Path(collection_id): Path<Uuid>,
 ) -> Result<Json<Vec<Image>>> {
-	let images = match params.collection_id {
-		Some(c_id) => Image::get_all_for_collection(&db, c_id).await?,
-		None => Image::get_all(&db).await?,
-	};
-
-	Ok(Json(images))
+	Ok(Json(
+		Image::get_all_for_collection(&db, collection_id).await?,
+	))
 }
 
-pub async fn get_collection_metadata(Extension(db): DbExtension) -> Result<Json<Vec<Collection>>> {
+pub async fn get_collections(Extension(db): DbExtension) -> Result<Json<Vec<Collection>>> {
 	Ok(Json(Collection::get_all(&db).await?))
+}
+
+#[derive(serde::Deserialize)]
+pub struct CreateCollectionRequest {
+	name: String,
+}
+
+pub async fn create_collection(
+	Extension(db): DbExtension,
+	Json(req): Json<CreateCollectionRequest>,
+) -> Result<Json<Collection>> {
+	Ok(Json(
+		NewCollection { name: req.name }.insert_one(&db).await?,
+	))
 }

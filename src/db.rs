@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use axum::Extension;
 use uuid::Uuid;
@@ -24,23 +24,59 @@ pub async fn init(db_url: &str) -> Db {
 	pool
 }
 
+#[derive(serde::Serialize)]
+pub struct NewCollection {
+	pub name: String,
+}
+
+impl NewCollection {
+	pub async fn insert_one(self, db: &Db) -> sqlx::Result<Collection> {
+		let id = Uuid::new_v4();
+
+		sqlx::query("insert into collections values ($1, $2)")
+			.bind(id)
+			.bind(&self.name)
+			.execute(db)
+			.await?;
+
+		Ok(Collection {
+			id,
+			name: self.name,
+			finalized: false,
+		})
+	}
+}
+
 #[derive(sqlx::FromRow, serde::Serialize)]
 pub struct Collection {
 	pub id: sqlx::types::Uuid,
 	pub name: String,
+	pub finalized: bool,
 }
 
 impl Collection {
+	pub async fn get_by_id(db: &Db, id: Uuid) -> sqlx::Result<Option<Collection>> {
+		sqlx::query_as("select * from collections where id = $1")
+			.bind(id)
+			.fetch_optional(db)
+			.await
+	}
+
 	pub async fn get_all(db: &Db) -> sqlx::Result<Vec<Collection>> {
 		sqlx::query_as("select * from collections")
 			.fetch_all(db)
 			.await
 	}
 
-	pub async fn get_default(db: &Db) -> sqlx::Result<Collection> {
-		sqlx::query_as("select * from collections where name = 'Default'")
-			.fetch_one(db)
-			.await
+	pub async fn save(&self, db: &Db) -> sqlx::Result<()> {
+		sqlx::query("update collections set name = $1, finalized = $2 where id = $1")
+			.bind(&self.name)
+			.bind(self.finalized)
+			.bind(self.id)
+			.execute(db)
+			.await?;
+
+		Ok(())
 	}
 }
 
@@ -56,20 +92,9 @@ pub struct Image {
 }
 
 impl Image {
-	pub async fn get_all(db: &Db) -> sqlx::Result<Vec<Image>> {
-		sqlx::query_as("select * from images").fetch_all(db).await
-	}
-
 	pub async fn get_all_for_collection(db: &Db, collection_id: Uuid) -> sqlx::Result<Vec<Image>> {
 		sqlx::query_as("select * from images where collection_id = $1")
 			.bind(collection_id)
-			.fetch_all(db)
-			.await
-	}
-
-	pub async fn get_all_with_limit(db: &Db, limit: u32) -> sqlx::Result<Vec<Self>> {
-		sqlx::query_as("select * from images limit $1")
-			.bind(limit as i64)
 			.fetch_all(db)
 			.await
 	}
@@ -80,46 +105,25 @@ impl Image {
 			.fetch_optional(db)
 			.await
 	}
-
-	pub async fn get_by_id_list(db: &Db, id_list: &[sqlx::types::Uuid]) -> sqlx::Result<Vec<Self>> {
-		// NOTE: this code does not work as of yet, will debug later
-		// sqlx::query_as("select * from images where id in $1")
-		// 	.bind(id_list)
-		// 	.fetch_all(db)
-		// 	.await
-
-		// NOTE: instead, we manually filter relevant ids
-		let id_set: HashSet<_> = id_list.iter().collect();
-		Ok(Image::get_all(&db)
-			.await?
-			.into_iter()
-			.filter(|image| id_set.contains(&image.id))
-			.collect())
-	}
 }
 
 pub struct NewImage {
 	pub name: String,
 	pub width: u32,
 	pub height: u32,
-	pub collection_id: Option<sqlx::types::Uuid>,
+	pub collection_id: sqlx::types::Uuid,
 }
 
 impl NewImage {
 	pub async fn insert_one(self, db: &Db) -> Result<Image, Error> {
 		let id = Uuid::new_v4();
 
-		let collection_id = match self.collection_id {
-			Some(collection_id) => collection_id,
-			None => Collection::get_default(db).await?.id,
-		};
-
 		sqlx::query("insert into images values ($1, $2, $3, $4, $5)")
 			.bind(id)
 			.bind(&self.name)
 			.bind(self.width as i32)
 			.bind(self.height as i32)
-			.bind(collection_id)
+			.bind(self.collection_id)
 			.execute(db)
 			.await?;
 
@@ -128,7 +132,7 @@ impl NewImage {
 			name: self.name,
 			width: self.width,
 			height: self.height,
-			collection_id,
+			collection_id: self.collection_id,
 		})
 	}
 }

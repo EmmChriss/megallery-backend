@@ -43,6 +43,9 @@ pub enum Error {
 
 	#[error("generic error")]
 	GenericInternalError,
+
+	#[error("not found: {0}")]
+	NotFound(String),
 }
 
 impl IntoResponse for Error {

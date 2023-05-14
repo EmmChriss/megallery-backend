@@ -166,6 +166,8 @@ pub async fn upload_image(
 	// if either field is missing
 	let name = name.ok_or(Error::MultipartMissingField("name".into()))?;
 	let data = data.ok_or(Error::MultipartMissingField("data".into()))?;
+	let collection_id =
+		collection_id.ok_or(Error::MultipartMissingField("collection_id".into()))?;
 
 	// read image, make sure format is correct
 	let img = ImageReader::new(Cursor::new(&data)).with_guessed_format()?;

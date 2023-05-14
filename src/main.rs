@@ -5,8 +5,7 @@ mod err;
 mod metadata;
 mod upload;
 
-use atlas::AtlasTriggerExtension;
-use db::{DbExtension, Image, ImageFile};
+use db::{Collection, DbExtension, Image, ImageFile};
 use err::Result;
 
 use axum::{
@@ -17,7 +16,11 @@ use axum::{
 use dotenv;
 use env_logger;
 
-use std::{net::SocketAddr, path::Path, sync::Arc};
+use std::{
+	net::SocketAddr,
+	path::{Path, PathBuf},
+	sync::Arc,
+};
 
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
@@ -38,6 +41,14 @@ where
 {
 	let id_str = uuid_to_string(id);
 	ser.serialize_str(&id_str)
+}
+
+fn get_static_atlas_path(collection: Collection) -> PathBuf {
+	let mut path = PathBuf::new();
+	path.push("./images/atlas/");
+	path.push(uuid_to_string(&collection.id));
+	path.set_extension("msgp");
+	path
 }
 
 #[tokio::main]
@@ -64,21 +75,17 @@ async fn main() {
 
 	// define app routes
 	let db_extension: DbExtension = Extension(Arc::new(pool));
-	let atlas_timer_extension: AtlasTriggerExtension = Extension(Arc::new(
-		tokio::sync::Mutex::new(atlas::AtlasTrigger::new()),
-	));
 
 	let app = axum::Router::new()
-		.route("/collections", get(metadata::get_collection_metadata))
 		.route(
-			"/images",
-			get(metadata::get_image_metadata).post(upload::upload_image),
+			"/collections",
+			get(crate::metadata::get_collections).post(crate::metadata::create_collection),
 		)
-		.route("/images/bulk", post(crate::bulk::get_images_bulk))
-		.route("/atlases/dynamic", post(crate::atlas::get_dynamic_atlas))
-		.route("/atlases/static", get(crate::atlas::get_static_atlas))
+		.route("/:id", get(crate::metadata::get_image_metadata))
+		.route("/:id/upload", post(crate::upload::upload_image))
+		.route("/:id/bulk", post(crate::bulk::get_images_bulk))
+		.route("/:id/atlas", get(crate::atlas::get_static_atlas))
 		.layer(db_extension)
-		.layer(atlas_timer_extension)
 		.layer(CorsLayer::permissive());
 
 	// start built-in server
