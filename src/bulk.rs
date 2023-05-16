@@ -14,8 +14,8 @@ use crate::RESPONSE_MAX_SIZE;
 #[derive(serde::Deserialize, Clone, Copy)]
 pub struct BulkImageRequestEntry {
 	id: Uuid,
-	max_width: u32,
-	max_height: u32,
+	width: u32,
+	height: u32,
 }
 
 pub async fn get_images_bulk(
@@ -48,20 +48,27 @@ pub async fn get_images_bulk(
 				}
 
 				let mut buf = vec![];
-				let image_file =
-					match ImageFile::get_by_max_size(&db, r.id, r.max_width, r.max_height).await? {
-						Some(s) => s,
-						None => {
-							log::warn!(
-								"could not find image file {} <= {}x{}",
-								r.id,
-								r.max_width,
-								r.max_height
-							);
-							rmp::encode::write_nil(&mut buf)?;
-							return Ok(buf);
-						}
-					};
+				let image_file = match ImageFile::get_by_id(
+					&db,
+					r.id,
+					r.width,
+					r.height,
+					crate::db::ImageFileKind::Thumbnail,
+				)
+				.await?
+				{
+					Some(s) => s,
+					None => {
+						log::warn!(
+							"could not find image file {} <= {}x{}",
+							r.id,
+							r.width,
+							r.height
+						);
+						rmp::encode::write_nil(&mut buf)?;
+						return Ok(buf);
+					}
+				};
 
 				// load and resize image to the given bounds
 				let path = image_file.get_path();

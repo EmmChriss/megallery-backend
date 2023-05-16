@@ -5,7 +5,7 @@ mod err;
 mod metadata;
 mod upload;
 
-use db::{Collection, DbExtension, Image, ImageFile};
+use db::{DbExtension, Image, ImageFile};
 use err::Result;
 
 use axum::{
@@ -43,10 +43,10 @@ where
 	ser.serialize_str(&id_str)
 }
 
-fn get_static_atlas_path(collection: Collection) -> PathBuf {
+fn get_static_atlas_path(collection_id: Uuid) -> PathBuf {
 	let mut path = PathBuf::new();
 	path.push("./images/atlas/");
-	path.push(uuid_to_string(&collection.id));
+	path.push(uuid_to_string(&collection_id));
 	path.set_extension("msgp");
 	path
 }
@@ -83,6 +83,7 @@ async fn main() {
 		)
 		.route("/:id", get(crate::metadata::get_image_metadata))
 		.route("/:id/upload", post(crate::upload::upload_image))
+		.route("/:id/finalize", post(crate::upload::finalize_collection))
 		.route("/:id/bulk", post(crate::bulk::get_images_bulk))
 		.route("/:id/atlas", get(crate::atlas::get_static_atlas))
 		.layer(db_extension)

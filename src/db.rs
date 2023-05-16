@@ -33,7 +33,7 @@ impl NewCollection {
 	pub async fn insert_one(self, db: &Db) -> sqlx::Result<Collection> {
 		let id = Uuid::new_v4();
 
-		sqlx::query("insert into collections values ($1, $2)")
+		sqlx::query("INSERT INTO collections VALUES ($1, $2)")
 			.bind(id)
 			.bind(&self.name)
 			.execute(db)
@@ -56,20 +56,20 @@ pub struct Collection {
 
 impl Collection {
 	pub async fn get_by_id(db: &Db, id: Uuid) -> sqlx::Result<Option<Collection>> {
-		sqlx::query_as("select * from collections where id = $1")
+		sqlx::query_as("SELECT * FROM collections WHERE id = $1")
 			.bind(id)
 			.fetch_optional(db)
 			.await
 	}
 
 	pub async fn get_all(db: &Db) -> sqlx::Result<Vec<Collection>> {
-		sqlx::query_as("select * from collections")
+		sqlx::query_as("SELECT * FROM collections")
 			.fetch_all(db)
 			.await
 	}
 
 	pub async fn save(&self, db: &Db) -> sqlx::Result<()> {
-		sqlx::query("update collections set name = $1, finalized = $2 where id = $1")
+		sqlx::query("UPDATE collections SET name = $1, finalized = $2 WHERE id = $1")
 			.bind(&self.name)
 			.bind(self.finalized)
 			.bind(self.id)
@@ -93,14 +93,14 @@ pub struct Image {
 
 impl Image {
 	pub async fn get_all_for_collection(db: &Db, collection_id: Uuid) -> sqlx::Result<Vec<Image>> {
-		sqlx::query_as("select * from images where collection_id = $1")
+		sqlx::query_as("SELECT * FROM images WHERE collection_id = $1")
 			.bind(collection_id)
 			.fetch_all(db)
 			.await
 	}
 
 	pub async fn get_by_id(db: &Db, id: sqlx::types::Uuid) -> sqlx::Result<Option<Self>> {
-		sqlx::query_as("select * from images where id = $1")
+		sqlx::query_as("SELECT * FROM images WHERE id = $1")
 			.bind(id)
 			.fetch_optional(db)
 			.await
@@ -118,7 +118,7 @@ impl NewImage {
 	pub async fn insert_one(self, db: &Db) -> Result<Image, Error> {
 		let id = Uuid::new_v4();
 
-		sqlx::query("insert into images values ($1, $2, $3, $4, $5)")
+		sqlx::query("INSERT INTO images VALUES ($1, $2, $3, $4, $5)")
 			.bind(id)
 			.bind(&self.name)
 			.bind(self.width as i32)
@@ -137,6 +137,14 @@ impl NewImage {
 	}
 }
 
+#[derive(sqlx::Type)]
+#[repr(i32)]
+pub enum ImageFileKind {
+	Original = 0,
+	Thumbnail = 1,
+	Partial = 2,
+}
+
 #[derive(sqlx::FromRow)]
 pub struct ImageFile {
 	pub image_id: Uuid,
@@ -145,11 +153,12 @@ pub struct ImageFile {
 	#[sqlx(try_from = "i32")]
 	pub height: u32,
 	pub extension: String,
+	pub kind: ImageFileKind,
 }
 
 impl ImageFile {
 	pub async fn insert_one(self, db: &Db) -> Result<(), sqlx::Error> {
-		sqlx::query("insert into image_files values ($1, $2, $3, $4)")
+		sqlx::query("INSERT INTO image_files VALUES ($1, $2, $3, $4)")
 			.bind(self.image_id)
 			.bind(self.width as i32)
 			.bind(self.height as i32)
@@ -164,33 +173,36 @@ impl ImageFile {
 		id: Uuid,
 		width: u32,
 		height: u32,
-	) -> Result<Option<Self>, sqlx::Error> {
-		sqlx::query_as(
-			"select * from image_files where image_id = $1 AND width = $2 AND height = $3",
-		)
-		.bind(id)
-		.bind(width as i32)
-		.bind(height as i32)
-		.fetch_optional(db)
-		.await
-	}
-
-	pub async fn get_by_max_size(
-		db: &Db,
-		id: Uuid,
-		max_width: u32,
-		max_height: u32,
+		kind: ImageFileKind,
 	) -> Result<Option<Self>, sqlx::Error> {
 		sqlx::query_as(
 			"
 			SELECT * FROM image_files
-			WHERE image_id = $1 AND width <= $2 AND height <= $3
-			ORDER BY width DESC, height DESC
+			WHERE
+				image_id = $1 AND
+				width = $2 AND
+				height = $3 AND
+				kind = $4
+			LIMIT 1
+			",
+		)
+		.bind(id)
+		.bind(width as i32)
+		.bind(height as i32)
+		.bind(kind)
+		.fetch_optional(db)
+		.await
+	}
+
+	pub async fn get_smallest(db: &Db, id: Uuid) -> sqlx::Result<Option<Self>> {
+		sqlx::query_as(
+			"
+			SELECT * FROM image_files
+			WHERE image_id = $1
+			ORDER BY width ASC, height ASC
 			LIMIT 1",
 		)
 		.bind(id)
-		.bind(max_width as i32)
-		.bind(max_height as i32)
 		.fetch_optional(db)
 		.await
 	}
@@ -199,7 +211,12 @@ impl ImageFile {
 		let mut path = PathBuf::new();
 		path.push(IMAGES_PATH);
 		path.push(crate::uuid_to_string(&self.image_id));
-		path.push(format!("{}x{}", self.width, self.height));
+
+		match self.kind {
+			ImageFileKind::Thumbnail => path.push(format!("{}x{}", self.width, self.height)),
+			ImageFileKind::Original => path.push("original"),
+			ImageFileKind::Partial => unimplemented!(),
+		}
 		path.set_extension(&self.extension);
 
 		return path;

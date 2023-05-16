@@ -3,13 +3,14 @@ use std::io::{BufReader, Cursor};
 use std::sync::Arc;
 
 use axum::extract::Path;
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Extension;
 use image::io::Reader as ImageReader;
 use image::ImageBuffer;
 use uuid::Uuid;
 
-use crate::db::{Collection, Db};
+use crate::db::{Collection, Db, ImageFileKind};
 use crate::err::{Error, Result};
 use crate::{
 	get_static_atlas_path, uuid_to_string_serialize, DbExtension, Image, ImageFile,
@@ -109,10 +110,13 @@ async fn build_atlas(
 		.map(|m| (m, img_atlas_mutex.clone(), db.clone()))
 		.map(|(m, image_atlas, db)| async move {
 			// load image entry from db
-			let image_entry = match ImageFile::get_by_id(&db, m.id, m.width, m.height).await? {
-				None => return Ok::<(), Error>(()), // @TODO handle missing image entry
-				Some(s) => s,
-			};
+			let image_entry =
+				match ImageFile::get_by_id(&db, m.id, m.width, m.height, ImageFileKind::Thumbnail)
+					.await?
+				{
+					None => return Ok::<(), Error>(()), // @TODO handle missing image entry
+					Some(s) => s,
+				};
 
 			// load and resize image to the given bounds
 			let path = image_entry.get_path();
@@ -146,18 +150,18 @@ async fn build_atlas(
 	Ok(img_atlas)
 }
 
-const MAX_AREA: u32 = 1500;
 const MAX_SIZE: u32 = 4000;
 
 pub async fn regenerate_static_atlas(db: &Db, collection_id: Uuid) -> Result<()> {
 	let mut metadata = Image::get_all_for_collection(&db, collection_id).await?;
 
-	metadata.iter_mut().for_each(|meta| {
-		while meta.width * meta.height > MAX_AREA {
-			meta.width /= 2;
-			meta.height /= 2;
+	for meta in metadata.iter_mut() {
+		let image_file = ImageFile::get_smallest(db, meta.id).await?;
+		if let Some(image_file) = image_file {
+			meta.width = image_file.width;
+			meta.height = image_file.height;
 		}
-	});
+	}
 
 	metadata.sort_unstable_by_key(|m| u32::MAX - m.height);
 
@@ -175,7 +179,7 @@ pub async fn regenerate_static_atlas(db: &Db, collection_id: Uuid) -> Result<()>
 		}
 	}
 
-	let file = File::create(STATIC_ATLAS_PATH)?;
+	let file = File::create(crate::get_static_atlas_path(collection_id))?;
 	let mut writer = std::io::BufWriter::new(file);
 	rmp::encode::write_array_len(&mut writer, mappings.len() as u32)?;
 
@@ -209,7 +213,14 @@ pub async fn get_static_atlas(
 		.await?
 		.ok_or(Error::NotFound("collection".into()))?;
 
-	let path = get_static_atlas_path(collection);
+	if !collection.finalized {
+		return Err(Error::Custom(
+			StatusCode::BAD_REQUEST,
+			"collection not finalized".into(),
+		));
+	}
+
+	let path = get_static_atlas_path(collection.id);
 	let exists = path.try_exists()?;
 
 	if !exists {

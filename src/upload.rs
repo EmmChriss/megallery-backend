@@ -1,6 +1,6 @@
 use std::io::Cursor;
 
-use axum::{http::StatusCode, Extension, Json};
+use axum::{extract::Path, http::StatusCode, response::IntoResponse, Extension, Json};
 use fast_image_resize as resize;
 use image::io::Reader as ImageReader;
 use tokio::{
@@ -10,7 +10,8 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-	db::{Db, DbExtension, Image, ImageFile, NewImage},
+	atlas::regenerate_static_atlas,
+	db::{Collection, Db, DbExtension, Image, ImageFile, ImageFileKind, NewImage},
 	err::{Error, Result},
 };
 
@@ -41,6 +42,7 @@ pub async fn save_image(
 		width,
 		height,
 		extension: format.extensions_str()[0].to_owned(),
+		kind: ImageFileKind::Thumbnail,
 	};
 
 	let path = image_file.get_path();
@@ -75,16 +77,34 @@ pub async fn save_image_thumbnails(
 		resize::PixelType::U8x3,
 	)?;
 
-	let mut width = img.width();
-	let mut height = img.height();
-	loop {
-		width /= 2;
-		height /= 2;
+	let width = img.width();
+	let height = img.height();
 
-		if width < 5 || height < 5 {
-			break;
+	let largest_that_fits = |(w, h): (u32, u32)| {
+		let r1 = (width as f32) / (w as f32);
+		let r2 = (height as f32) / (h as f32);
+		let m = f32::max(r1, r2);
+
+		// don't attempt upscaling
+		if m <= 1. {
+			None
+		} else {
+			Some(((w as f32 / m) as u32, (h as f32 / m) as u32))
 		}
+	};
 
+	let sizes = [
+		// save original size reencoded in jpg
+		Some((width, height)),
+		// save small thumbnail
+		largest_that_fits((100, 100)),
+		// save large thumbnail
+		largest_that_fits((500, 500)),
+		// save giga thumbnail
+		largest_that_fits((1000, 1000)),
+	];
+
+	for size in sizes {
 		measure_time::warn_time!(
 			"resizing {}x{} -> {}x{}",
 			img.width(),
@@ -92,6 +112,12 @@ pub async fn save_image_thumbnails(
 			width,
 			height
 		);
+
+		// only count in sizes smaller than the original image
+		let (width, height) = match size {
+			Some(size) => size,
+			None => continue,
+		};
 
 		let dst_width = std::num::NonZeroU32::new(width).unwrap();
 		let dst_height = std::num::NonZeroU32::new(height).unwrap();
@@ -126,9 +152,20 @@ pub async fn save_image_thumbnails(
 
 pub async fn upload_image(
 	Extension(db): DbExtension,
+	Path(collection_id): Path<Uuid>,
 	mut req: axum::extract::Multipart,
 ) -> Result<Json<Image>> {
 	measure_time::warn_time!("responding");
+
+	// make sure collection exists and is not finalized
+	let mut collection = Collection::get_by_id(&db, collection_id)
+		.await?
+		.ok_or(Error::NotFound("collection".into()))?;
+
+	if collection.finalized {
+		collection.finalized = false;
+		collection.save(&db).await?;
+	}
 
 	// read multipart data
 	// @TODO: ward off duplicate values
@@ -136,7 +173,6 @@ pub async fn upload_image(
 	// @TODO: write to fs while receiving
 	let mut name = None;
 	let mut data = None;
-	let mut collection_id = None;
 	{
 		measure_time::warn_time!("receiving data");
 
@@ -145,14 +181,6 @@ pub async fn upload_image(
 			match field_name {
 				"name" => name = Some(field.text().await?),
 				"data" => data = Some(field.bytes().await?),
-				"collection_id" => {
-					collection_id = Some(Uuid::try_parse(&field.text().await?).map_err(|_| {
-						Error::Custom(
-							StatusCode::BAD_REQUEST,
-							format!("collection_id: invalid uuid"),
-						)
-					})?)
-				}
 				_ => {
 					return Err(Error::Custom(
 						StatusCode::BAD_REQUEST,
@@ -166,8 +194,6 @@ pub async fn upload_image(
 	// if either field is missing
 	let name = name.ok_or(Error::MultipartMissingField("name".into()))?;
 	let data = data.ok_or(Error::MultipartMissingField("data".into()))?;
-	let collection_id =
-		collection_id.ok_or(Error::MultipartMissingField("collection_id".into()))?;
 
 	// read image, make sure format is correct
 	let img = ImageReader::new(Cursor::new(&data)).with_guessed_format()?;
@@ -191,6 +217,7 @@ pub async fn upload_image(
 		width: img.width(),
 		height: img.height(),
 		extension,
+		kind: ImageFileKind::Original,
 	};
 	let path = image_file.get_path();
 
@@ -209,4 +236,24 @@ pub async fn upload_image(
 	});
 
 	Ok(Json(meta))
+}
+
+pub async fn finalize_collection(
+	Extension(db): DbExtension,
+	Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse> {
+	let collection = Collection::get_by_id(&db, id)
+		.await?
+		.ok_or(Error::NotFound("collection".into()))?;
+
+	if collection.finalized {
+		return Err(Error::Custom(
+			StatusCode::BAD_REQUEST,
+			"collection already finalized".into(),
+		));
+	}
+
+	regenerate_static_atlas(&db, id).await?;
+
+	Ok(())
 }
