@@ -12,11 +12,7 @@ use crate::err::{Error, Result};
 use crate::RESPONSE_MAX_SIZE;
 
 #[derive(serde::Deserialize, Clone, Copy)]
-pub struct BulkImageRequestEntry {
-	id: Uuid,
-	width: u32,
-	height: u32,
-}
+pub struct BulkImageRequestEntry(Uuid, u32, u32);
 
 pub async fn get_images_bulk(
 	Extension(db): DbExtension,
@@ -50,21 +46,16 @@ pub async fn get_images_bulk(
 				let mut buf = vec![];
 				let image_file = match ImageFile::get_by_id(
 					&db,
-					r.id,
-					r.width,
-					r.height,
+					r.0,
+					r.1,
+					r.2,
 					crate::db::ImageFileKind::Thumbnail,
 				)
 				.await?
 				{
 					Some(s) => s,
 					None => {
-						log::warn!(
-							"could not find image file {} <= {}x{}",
-							r.id,
-							r.width,
-							r.height
-						);
+						log::warn!("could not find image file {} <= {}x{}", r.0, r.1, r.2);
 						rmp::encode::write_nil(&mut buf)?;
 						return Ok(buf);
 					}

@@ -5,12 +5,19 @@ use uuid::Uuid;
 use crate::db::{Collection, DbExtension, Image, NewCollection};
 use crate::err::Result;
 
+#[derive(serde::Serialize)]
+pub struct ImageMetadataResponse(Uuid, u32, u32);
+
 pub async fn get_image_metadata(
 	Extension(db): DbExtension,
 	Path(collection_id): Path<Uuid>,
-) -> Result<Json<Vec<Image>>> {
+) -> Result<Json<Vec<ImageMetadataResponse>>> {
 	Ok(Json(
-		Image::get_all_for_collection(&db, collection_id).await?,
+		Image::get_all_for_collection(&db, collection_id)
+			.await?
+			.into_iter()
+			.map(|meta| ImageMetadataResponse(meta.id, meta.width, meta.height))
+			.collect(),
 	))
 }
 
