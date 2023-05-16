@@ -81,15 +81,15 @@ pub async fn save_image_thumbnails(
 	let height = img.height();
 
 	let largest_that_fits = |(w, h): (u32, u32)| {
-		let r1 = (width as f32) / (w as f32);
-		let r2 = (height as f32) / (h as f32);
-		let m = f32::max(r1, r2);
+		let wr = (width as f32) / (w as f32);
+		let hr = (height as f32) / (h as f32);
+		let m = f32::max(wr, hr);
 
 		// don't attempt upscaling
 		if m <= 1. {
 			None
 		} else {
-			Some(((w as f32 / m) as u32, (h as f32 / m) as u32))
+			Some(((width as f32 / m) as u32, (height as f32 / m) as u32))
 		}
 	};
 
@@ -171,28 +171,27 @@ pub async fn upload_image(
 	// @TODO: ward off duplicate values
 	// @TODO: limit file size
 	// @TODO: write to fs while receiving
-	let mut name = None;
+	let mut file_name = None;
 	let mut data = None;
 	{
 		measure_time::warn_time!("receiving data");
 
 		while let Some(field) = req.next_field().await? {
 			let field_name = field.name().ok_or(Error::MultipartMissingName)?;
-			match field_name {
-				"name" => name = Some(field.text().await?),
-				"data" => data = Some(field.bytes().await?),
-				_ => {
-					return Err(Error::Custom(
-						StatusCode::BAD_REQUEST,
-						format!("unknown field: {}", field_name),
-					))
-				}
+			if field_name != "image" {
+				return Err(Error::Custom(
+					StatusCode::BAD_REQUEST,
+					format!("unknown field: {}", field_name),
+				));
 			}
+
+			file_name = field.file_name().map(String::from);
+			data = Some(field.bytes().await?);
 		}
 	}
 
 	// if either field is missing
-	let name = name.ok_or(Error::MultipartMissingField("name".into()))?;
+	// let name = name.ok_or(Error::MultipartMissingField("name".into()))?;
 	let data = data.ok_or(Error::MultipartMissingField("data".into()))?;
 
 	// read image, make sure format is correct
@@ -220,7 +219,10 @@ pub async fn upload_image(
 	};
 	let path = image_file.get_path();
 
-	std::fs::create_dir_all(&path)?;
+	let mut dirname = path.clone();
+	dirname.pop();
+
+	std::fs::create_dir_all(&dirname)?;
 	let mut writer = BufWriter::new(File::create(path).await?);
 	writer.write_all(&data).await?;
 	image_file.insert_one(&db).await?;

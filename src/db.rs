@@ -141,9 +141,9 @@ impl NewImage {
 #[derive(sqlx::Type)]
 #[repr(i32)]
 pub enum ImageFileKind {
-	Original = 0,
-	Thumbnail = 1,
-	Partial = 2,
+	Original = 1,
+	Thumbnail = 2,
+	Partial = 3,
 }
 
 #[derive(sqlx::FromRow)]
@@ -159,14 +159,20 @@ pub struct ImageFile {
 
 impl ImageFile {
 	pub async fn insert_one(self, db: &Db) -> Result<(), sqlx::Error> {
-		sqlx::query("INSERT INTO image_files VALUES ($1, $2, $3, $4)")
-			.bind(self.image_id)
-			.bind(self.width as i32)
-			.bind(self.height as i32)
-			.bind(self.extension)
-			.execute(db)
-			.await
-			.map(|_| ())
+		sqlx::query(
+			"
+			INSERT INTO image_files (image_id, width, height, extension, kind)
+			VALUES ($1, $2, $3, $4, $5)
+			",
+		)
+		.bind(self.image_id)
+		.bind(self.width as i32)
+		.bind(self.height as i32)
+		.bind(self.extension)
+		.bind(self.kind)
+		.execute(db)
+		.await
+		.map(|_| ())
 	}
 
 	pub async fn get_by_id(
