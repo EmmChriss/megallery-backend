@@ -26,8 +26,8 @@ use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 const IMAGES_PATH: &str = "./images";
-const STATIC_ATLAS_PATH: &str = "./images/static_atlas.msgp";
 const RESPONSE_MAX_SIZE: u64 = 512 * 1024 * 1024;
+const STATIC_ATLASES_DIR: &str = "./images/atlases";
 
 fn uuid_to_string(id: &Uuid) -> String {
 	let mut id_buf = Uuid::encode_buffer();
@@ -45,7 +45,7 @@ where
 
 fn get_static_atlas_path(collection_id: Uuid) -> PathBuf {
 	let mut path = PathBuf::new();
-	path.push("./images/atlas/");
+	path.push(STATIC_ATLASES_DIR);
 	path.push(uuid_to_string(&collection_id));
 	path.set_extension("msgp");
 	path
@@ -66,6 +66,15 @@ async fn main() {
 
 	// make sure "images" directory exists
 	let images = Path::new(IMAGES_PATH);
+	if !images.exists() {
+		std::fs::create_dir(images).expect("could not create ./images directory");
+	}
+	if !images.is_dir() {
+		panic!("./images is not a directory");
+	}
+
+	// make sure "atlases" directory exists
+	let images = Path::new(STATIC_ATLASES_DIR);
 	if !images.exists() {
 		std::fs::create_dir(images).expect("could not create ./images directory");
 	}

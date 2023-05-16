@@ -69,7 +69,7 @@ impl Collection {
 	}
 
 	pub async fn save(&self, db: &Db) -> sqlx::Result<()> {
-		sqlx::query("UPDATE collections SET name = $1, finalized = $2 WHERE id = $1")
+		sqlx::query("UPDATE collections SET name = $1, finalized = $2 WHERE id = $3")
 			.bind(&self.name)
 			.bind(self.finalized)
 			.bind(self.id)
@@ -230,7 +230,8 @@ impl ImageFile {
 			SELECT * FROM image_files
 			WHERE image_id = $1
 			ORDER BY width ASC, height ASC
-			LIMIT 1",
+			LIMIT 1
+			",
 		)
 		.bind(id)
 		.fetch_optional(db)

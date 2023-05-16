@@ -94,14 +94,16 @@ pub async fn save_image_thumbnails(
 	};
 
 	let sizes = [
-		// save original size reencoded in jpg
-		Some((width, height)),
+		// save x-small thumbnail for static atlas
+		largest_that_fits((30, 30)),
 		// save small thumbnail
 		largest_that_fits((100, 100)),
 		// save large thumbnail
 		largest_that_fits((500, 500)),
 		// save giga thumbnail
 		largest_that_fits((1000, 1000)),
+		// save original size reencoded in jpg
+		Some((width, height)),
 	];
 
 	for size in sizes {
@@ -243,18 +245,14 @@ pub async fn finalize_collection(
 	Extension(db): DbExtension,
 	Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse> {
-	let collection = Collection::get_by_id(&db, id)
+	let mut collection = Collection::get_by_id(&db, id)
 		.await?
 		.ok_or(Error::NotFound("collection".into()))?;
 
-	if collection.finalized {
-		return Err(Error::Custom(
-			StatusCode::BAD_REQUEST,
-			"collection already finalized".into(),
-		));
-	}
-
 	regenerate_static_atlas(&db, id).await?;
+
+	collection.finalized = true;
+	collection.save(&db).await?;
 
 	Ok(())
 }

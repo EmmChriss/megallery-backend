@@ -12,10 +12,7 @@ use uuid::Uuid;
 
 use crate::db::{Collection, Db, ImageFileKind};
 use crate::err::{Error, Result};
-use crate::{
-	get_static_atlas_path, uuid_to_string_serialize, DbExtension, Image, ImageFile,
-	STATIC_ATLAS_PATH,
-};
+use crate::{get_static_atlas_path, uuid_to_string_serialize, DbExtension, Image, ImageFile};
 
 #[derive(serde::Serialize, Clone)]
 pub struct AtlasMapping {
