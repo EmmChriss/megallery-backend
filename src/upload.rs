@@ -202,7 +202,6 @@ pub async fn upload_image(
 
 	// construct new dto for insertion, return metadata
 	let meta = NewImage {
-		name: name.into(),
 		width: img.width(),
 		height: img.height(),
 		collection_id,

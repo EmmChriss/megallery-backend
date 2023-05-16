@@ -84,7 +84,6 @@ impl Collection {
 pub struct Image {
 	pub id: sqlx::types::Uuid,
 	pub collection_id: sqlx::types::Uuid,
-	pub name: String,
 	#[sqlx(try_from = "i32")]
 	pub width: u32,
 	#[sqlx(try_from = "i32")]
@@ -108,7 +107,6 @@ impl Image {
 }
 
 pub struct NewImage {
-	pub name: String,
 	pub width: u32,
 	pub height: u32,
 	pub collection_id: sqlx::types::Uuid,
@@ -118,18 +116,21 @@ impl NewImage {
 	pub async fn insert_one(self, db: &Db) -> Result<Image, Error> {
 		let id = Uuid::new_v4();
 
-		sqlx::query("INSERT INTO images VALUES ($1, $2, $3, $4, $5)")
-			.bind(id)
-			.bind(&self.name)
-			.bind(self.width as i32)
-			.bind(self.height as i32)
-			.bind(self.collection_id)
-			.execute(db)
-			.await?;
+		sqlx::query(
+			"
+			INSERT INTO images (id, width, height, collection_id)
+			VALUES ($1, $2, $3, $4)
+			",
+		)
+		.bind(id)
+		.bind(self.width as i32)
+		.bind(self.height as i32)
+		.bind(self.collection_id)
+		.execute(db)
+		.await?;
 
 		Ok(Image {
 			id,
-			name: self.name,
 			width: self.width,
 			height: self.height,
 			collection_id: self.collection_id,

@@ -227,7 +227,7 @@ pub async fn get_static_atlas(
 		regenerate_static_atlas(&db, collection_id).await?;
 	}
 
-	let atlas_file = tokio::fs::File::open(STATIC_ATLAS_PATH).await?;
+	let atlas_file = tokio::fs::File::open(path).await?;
 	let reader = tokio::io::BufReader::new(atlas_file);
 	let stream = tokio_util::io::ReaderStream::new(reader);
 
