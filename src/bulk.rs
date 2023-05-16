@@ -44,7 +44,7 @@ pub async fn get_images_bulk(
 				}
 
 				let mut buf = vec![];
-				let image_file = match ImageFile::get_by_id(
+				let image_file = match ImageFile::get_approximate_size(
 					&db,
 					r.0,
 					r.1,

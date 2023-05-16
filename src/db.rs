@@ -201,6 +201,29 @@ impl ImageFile {
 		.await
 	}
 
+	pub async fn get_approximate_size(
+		db: &Db,
+		id: Uuid,
+		width: u32,
+		height: u32,
+		kind: ImageFileKind,
+	) -> sqlx::Result<Option<Self>> {
+		sqlx::query_as(
+			"
+			SELECT * FROM image_files
+			WHERE image_id = $1 AND kind = $2
+			ORDER BY (@ (width - $3)) + (@ (height - $4))
+			LIMIT 1
+			",
+		)
+		.bind(id)
+		.bind(kind)
+		.bind(width as i32)
+		.bind(height as i32)
+		.fetch_optional(db)
+		.await
+	}
+
 	pub async fn get_smallest(db: &Db, id: Uuid) -> sqlx::Result<Option<Self>> {
 		sqlx::query_as(
 			"
