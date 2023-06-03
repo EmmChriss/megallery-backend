@@ -51,10 +51,12 @@ fn gen_atlas(meta: &[Image], max_size: u32) -> (Vec<AtlasMapping>, (u32, u32)) {
 	loop {
 		let mut width = 0;
 		let mut height = 0;
+		let mut first = true;
 		let row: Vec<_> = current_meta
 			.iter()
 			.take_while(|m| {
-				if width + m.width < buf_width {
+				if first || (width + m.width < buf_width) {
+					first = false;
 					width += m.width;
 					height = height.max(m.height);
 					buf_width = buf_width.max(width);

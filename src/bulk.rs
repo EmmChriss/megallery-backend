@@ -44,15 +44,7 @@ pub async fn get_images_bulk(
 				}
 
 				let mut buf = vec![];
-				let image_file = match ImageFile::get_approximate_size(
-					&db,
-					r.0,
-					r.1,
-					r.2,
-					crate::db::ImageFileKind::Thumbnail,
-				)
-				.await?
-				{
+				let image_file = match ImageFile::get_approximate_size(&db, r.0, r.1, r.2).await? {
 					Some(s) => s,
 					None => {
 						log::warn!("could not find image file {} <= {}x{}", r.0, r.1, r.2);

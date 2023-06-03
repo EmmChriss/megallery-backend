@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use axum::Extension;
 use uuid::Uuid;
@@ -80,7 +80,14 @@ impl Collection {
 	}
 }
 
-#[derive(sqlx::FromRow, serde::Serialize, Default, Clone)]
+#[derive(serde::Deserialize, serde::Serialize, Clone, Default, Debug)]
+pub struct ImageMetadata {
+	pub palette: Option<Vec<(u8, u8, u8)>>,
+	pub name: Option<String>,
+	pub exif: Option<HashMap<String, String>>,
+}
+
+#[derive(sqlx::FromRow, serde::Serialize, Clone, Debug)]
 pub struct Image {
 	pub id: sqlx::types::Uuid,
 	pub collection_id: sqlx::types::Uuid,
@@ -88,6 +95,7 @@ pub struct Image {
 	pub width: u32,
 	#[sqlx(try_from = "i32")]
 	pub height: u32,
+	pub metadata: sqlx::types::Json<ImageMetadata>,
 }
 
 impl Image {
@@ -103,6 +111,16 @@ impl Image {
 			.bind(id)
 			.fetch_optional(db)
 			.await
+	}
+
+	pub async fn save(&self, db: &Db) -> sqlx::Result<()> {
+		sqlx::query("UPDATE images SET metadata = $2 WHERE id = $1")
+			.bind(self.id)
+			.bind(&self.metadata)
+			.execute(db)
+			.await?;
+
+		Ok(())
 	}
 }
 
@@ -134,11 +152,12 @@ impl NewImage {
 			width: self.width,
 			height: self.height,
 			collection_id: self.collection_id,
+			metadata: sqlx::types::Json(ImageMetadata::default()),
 		})
 	}
 }
 
-#[derive(sqlx::Type)]
+#[derive(sqlx::Type, Debug)]
 #[repr(i32)]
 pub enum ImageFileKind {
 	Original = 1,
@@ -146,7 +165,7 @@ pub enum ImageFileKind {
 	Partial = 3,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx::FromRow, Debug)]
 pub struct ImageFile {
 	pub image_id: Uuid,
 	#[sqlx(try_from = "i32")]
@@ -206,18 +225,16 @@ impl ImageFile {
 		id: Uuid,
 		width: u32,
 		height: u32,
-		kind: ImageFileKind,
 	) -> sqlx::Result<Option<Self>> {
 		sqlx::query_as(
 			"
 			SELECT * FROM image_files
-			WHERE image_id = $1 AND kind = $2
-			ORDER BY (@ (width - $3)) + (@ (height - $4))
+			WHERE image_id = $1
+			ORDER BY (@ (width - $2)) + (@ (height - $3))
 			LIMIT 1
 			",
 		)
 		.bind(id)
-		.bind(kind)
 		.bind(width as i32)
 		.bind(height as i32)
 		.fetch_optional(db)

@@ -2,10 +2,11 @@ use std::io::Cursor;
 
 use axum::{extract::Path, http::StatusCode, response::IntoResponse, Extension, Json};
 use fast_image_resize as resize;
+use futures_util::{StreamExt, TryStreamExt};
 use image::io::Reader as ImageReader;
 use tokio::{
 	fs::File,
-	io::{AsyncWriteExt, BufWriter},
+	io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
 };
 use uuid::Uuid;
 
@@ -94,16 +95,12 @@ pub async fn save_image_thumbnails(
 	};
 
 	let sizes = [
-		// save x-small thumbnail for static atlas
+		// save small thumbnail for static atlas
 		largest_that_fits((30, 30)),
-		// save small thumbnail
-		largest_that_fits((100, 100)),
 		// save large thumbnail
 		largest_that_fits((500, 500)),
 		// save giga thumbnail
 		largest_that_fits((1000, 1000)),
-		// save original size reencoded in jpg
-		Some((width, height)),
 	];
 
 	for size in sizes {
@@ -202,7 +199,7 @@ pub async fn upload_image(
 	let img = img.decode()?;
 
 	// construct new dto for insertion, return metadata
-	let meta = NewImage {
+	let mut image = NewImage {
 		width: img.width(),
 		height: img.height(),
 		collection_id,
@@ -210,10 +207,14 @@ pub async fn upload_image(
 	.insert_one(&db)
 	.await?;
 
+	// update metadata; insert original filename
+	image.metadata.name = file_name;
+	image.save(&db).await?;
+
 	// save original version without modifying anything
 	let extension = format.unwrap().extensions_str()[0].to_owned();
 	let image_file = ImageFile {
-		image_id: meta.id,
+		image_id: image.id,
 		width: img.width(),
 		height: img.height(),
 		extension,
@@ -230,7 +231,7 @@ pub async fn upload_image(
 	image_file.insert_one(&db).await?;
 
 	// create and save image versions
-	let meta_ = meta.clone();
+	let meta_ = image.clone();
 	tokio::spawn(async move {
 		let res = save_image_thumbnails(&db.clone(), meta_, img).await;
 		if let Err(e) = res {
@@ -238,7 +239,90 @@ pub async fn upload_image(
 		}
 	});
 
-	Ok(Json(meta))
+	Ok(Json(image))
+}
+
+pub async fn regenerate_metadata(db: &Db, id: Uuid) -> Result<()> {
+	let images = Image::get_all_for_collection(db, id).await?;
+	let image_stream = futures_util::stream::iter(images.into_iter().map(Ok));
+	image_stream
+		.try_for_each_concurrent(16, |mut image| async move {
+			// extract color palette from largest thumbnail size
+			{
+				let image_file =
+					ImageFile::get_approximate_size(db, image.id, image.width, image.height)
+						.await?;
+
+				let image_file = match image_file {
+					None => return Ok::<_, Error>(()),
+					Some(file) => file,
+				};
+
+				let path = image_file.get_path();
+				let mut reader = BufReader::new(File::open(path).await?);
+				let mut buf = vec![];
+				reader.read_to_end(&mut buf).await?;
+				std::mem::drop(reader);
+
+				let img = ImageReader::new(Cursor::new(&buf))
+					.with_guessed_format()?
+					.decode()?;
+
+				let rgb = img.to_rgb8().into_raw();
+				let palette = color_thief::get_palette(&rgb, color_thief::ColorFormat::Rgb, 10, 3);
+
+				if let Ok(palette) = palette {
+					image.metadata.palette.replace(
+						palette
+							.into_iter()
+							.map(|rgb| (rgb.r, rgb.g, rgb.b))
+							.collect(),
+					);
+				}
+			}
+
+			// extract exif metadata
+			{
+				let image_file = ImageFile::get_by_id(
+					db,
+					image.id,
+					image.width,
+					image.height,
+					ImageFileKind::Original,
+				)
+				.await?;
+
+				let image_file = match image_file {
+					None => return Ok::<_, Error>(()),
+					Some(file) => file,
+				};
+
+				let mut reader = BufReader::new(File::open(image_file.get_path()).await?);
+				let mut buf = vec![];
+				reader.read_to_end(&mut buf).await?;
+
+				let mut reader = Cursor::new(buf);
+
+				let exif = exif::Reader::new().read_from_container(&mut reader);
+				if let Ok(exif) = exif {
+					for f in exif.fields() {
+						let tag = format!("{}", f.tag);
+						let val = format!("{}", f.display_value());
+						image
+							.metadata
+							.exif
+							.get_or_insert(Default::default())
+							.insert(tag, val);
+					}
+				}
+			}
+
+			// save everything
+			image.save(db).await?;
+
+			Ok(())
+		})
+		.await
 }
 
 pub async fn finalize_collection(
@@ -250,6 +334,7 @@ pub async fn finalize_collection(
 		.ok_or(Error::NotFound("collection".into()))?;
 
 	regenerate_static_atlas(&db, id).await?;
+	regenerate_metadata(&db, id).await?;
 
 	collection.finalized = true;
 	collection.save(&db).await?;
