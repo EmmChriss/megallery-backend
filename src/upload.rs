@@ -2,7 +2,7 @@ use std::io::Cursor;
 
 use axum::{extract::Path, http::StatusCode, response::IntoResponse, Extension, Json};
 use fast_image_resize as resize;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::TryStreamExt;
 use image::io::Reader as ImageReader;
 use tokio::{
 	fs::File,
@@ -27,6 +27,8 @@ lazy_static::lazy_static! {
 		}
 	};
 }
+
+pub const THUMBNAIL_FORMAT: image::ImageFormat = image::ImageFormat::Jpeg;
 
 pub async fn save_image(
 	db: &Db,
@@ -140,7 +142,7 @@ pub async fn save_image_thumbnails(
 			width,
 			height,
 			meta.id,
-			image::ImageFormat::Jpeg,
+			THUMBNAIL_FORMAT,
 			image::ColorType::Rgb8,
 		)
 		.await?;
@@ -244,14 +246,24 @@ pub async fn upload_image(
 
 pub async fn regenerate_metadata(db: &Db, id: Uuid) -> Result<()> {
 	let images = Image::get_all_for_collection(db, id).await?;
-	let image_stream = futures_util::stream::iter(images.into_iter().map(Ok));
+	let image_stream = futures_util::stream::iter(images.into_iter().map(Ok::<_, Error>));
 	image_stream
-		.try_for_each_concurrent(16, |mut image| async move {
-			// extract color palette from largest thumbnail size
-			{
-				let image_file =
-					ImageFile::get_approximate_size(db, image.id, image.width, image.height)
-						.await?;
+		.try_for_each_concurrent(4, |image| async move {
+			let img_multiref = std::sync::Arc::new(tokio::sync::Mutex::new(image));
+
+			let img = img_multiref.clone();
+			let extract_palette = async move {
+				let mut img = img.lock_owned().await;
+
+				// extract color palette from largest thumbnail size
+				let image_file = ImageFile::get_by_id(
+					db,
+					img.id,
+					img.width,
+					img.height,
+					ImageFileKind::Original,
+				)
+				.await?;
 
 				let image_file = match image_file {
 					None => return Ok::<_, Error>(()),
@@ -259,35 +271,42 @@ pub async fn regenerate_metadata(db: &Db, id: Uuid) -> Result<()> {
 				};
 
 				let path = image_file.get_path();
-				let mut reader = BufReader::new(File::open(path).await?);
-				let mut buf = vec![];
-				reader.read_to_end(&mut buf).await?;
-				std::mem::drop(reader);
+				let reader = std::io::BufReader::new(std::fs::File::open(path)?);
+				let format = image::ImageFormat::from_extension(image_file.extension).unwrap();
 
-				let img = ImageReader::new(Cursor::new(&buf))
-					.with_guessed_format()?
-					.decode()?;
+				let img_buf = ImageReader::with_format(reader, format).decode()?;
 
-				let rgb = img.to_rgb8().into_raw();
+				let rgb = img_buf.to_rgb8().into_raw();
 				let palette = color_thief::get_palette(&rgb, color_thief::ColorFormat::Rgb, 10, 3);
 
-				if let Ok(palette) = palette {
-					image.metadata.palette.replace(
-						palette
-							.into_iter()
-							.map(|rgb| (rgb.r, rgb.g, rgb.b))
-							.collect(),
-					);
+				match palette {
+					Ok(palette) => {
+						img.metadata.palette.replace(
+							palette
+								.into_iter()
+								.map(|rgb| (rgb.r, rgb.g, rgb.b))
+								.collect(),
+						);
+					}
+					Err(e) => return Err(e.into()),
 				}
+
+				Ok(())
+			}
+			.await;
+
+			if let Some(e) = extract_palette.err() {
+				log::error!("extract palette: {:?}", e);
 			}
 
-			// extract exif metadata
-			{
+			let img = img_multiref.clone();
+			let extract_exif = async move {
+				let mut img = img.lock_owned().await;
 				let image_file = ImageFile::get_by_id(
 					db,
-					image.id,
-					image.width,
-					image.height,
+					img.id,
+					img.width,
+					img.height,
 					ImageFileKind::Original,
 				)
 				.await?;
@@ -304,25 +323,36 @@ pub async fn regenerate_metadata(db: &Db, id: Uuid) -> Result<()> {
 				let mut reader = Cursor::new(buf);
 
 				let exif = exif::Reader::new().read_from_container(&mut reader);
-				if let Ok(exif) = exif {
-					for f in exif.fields() {
-						let tag = format!("{}", f.tag);
-						let val = format!("{}", f.display_value());
-						image
-							.metadata
-							.exif
-							.get_or_insert(Default::default())
-							.insert(tag, val);
+
+				match exif {
+					Err(e) => return Err(e.into()),
+					Ok(exif) => {
+						for f in exif.fields() {
+							let tag = format!("{}", f.tag);
+							let val = format!("{}", f.display_value());
+							img.metadata
+								.exif
+								.get_or_insert(Default::default())
+								.insert(tag, val);
+						}
 					}
 				}
+
+				Ok(())
+			}
+			.await;
+
+			if let Some(e) = extract_exif.err() {
+				log::error!("extract exif: {}", e);
 			}
 
-			// save everything
-			image.save(db).await?;
+			img_multiref.lock_owned().await.save(db).await?;
 
 			Ok(())
 		})
-		.await
+		.await?;
+
+	Ok(())
 }
 
 pub async fn finalize_collection(

@@ -90,7 +90,8 @@ async fn main() {
 			"/collections",
 			get(crate::metadata::get_collections).post(crate::metadata::create_collection),
 		)
-		.route("/:id", get(crate::metadata::get_image_metadata))
+		.route("/:id", get(crate::metadata::get_images))
+		.route("/:id/metadata", get(crate::metadata::get_image_metadata))
 		.route("/:id/upload", post(crate::upload::upload_image))
 		.route("/:id/finalize", post(crate::upload::finalize_collection))
 		.route("/:id/bulk", post(crate::bulk::get_images_bulk))

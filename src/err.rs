@@ -46,6 +46,12 @@ pub enum Error {
 
 	#[error("not found: {0}")]
 	NotFound(String),
+
+	#[error("color_thief error: {0}")]
+	ColorThiefError(#[from] color_thief::Error),
+
+	#[error("kamadak_exif error: {0}")]
+	KamadakExifError(#[from] exif::Error),
 }
 
 impl IntoResponse for Error {
