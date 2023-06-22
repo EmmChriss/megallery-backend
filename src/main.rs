@@ -2,6 +2,7 @@ mod atlas;
 mod bulk;
 mod db;
 mod err;
+mod layout;
 mod metadata;
 mod upload;
 
@@ -96,6 +97,7 @@ async fn main() {
 		.route("/:id/finalize", post(crate::upload::finalize_collection))
 		.route("/:id/bulk", post(crate::bulk::get_images_bulk))
 		.route("/:id/atlas", get(crate::atlas::get_static_atlas))
+		.route("/:id/layout", post(crate::layout::get_layout))
 		.layer(db_extension)
 		.layer(CorsLayer::permissive());
 

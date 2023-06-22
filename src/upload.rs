@@ -330,10 +330,24 @@ pub async fn regenerate_metadata(db: &Db, id: Uuid) -> Result<()> {
 						for f in exif.fields() {
 							let tag = format!("{}", f.tag);
 							let val = format!("{}", f.display_value());
+
 							img.metadata
 								.exif
 								.get_or_insert(Default::default())
 								.insert(tag, val);
+
+							match f.tag {
+								exif::Tag::DateTime => {
+									match chrono::NaiveDateTime::parse_from_str(
+										&format!("{}", f.display_value()),
+										"%Y-%m-%d %H:%M:%S",
+									) {
+										Ok(date_time) => img.metadata.date_time = Some(date_time),
+										Err(_) => {}
+									}
+								}
+								_ => {}
+							}
 						}
 					}
 				}

@@ -85,6 +85,7 @@ pub struct ImageMetadata {
 	pub palette: Option<Vec<(u8, u8, u8)>>,
 	pub name: Option<String>,
 	pub exif: Option<HashMap<String, String>>,
+	pub date_time: Option<chrono::NaiveDateTime>,
 }
 
 #[derive(sqlx::FromRow, serde::Serialize, Clone, Debug)]
