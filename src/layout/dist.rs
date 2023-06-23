@@ -27,7 +27,7 @@ impl DistanceFunction for PaletteDist {
 				let mut multiplier = 1.0;
 				let start = p1.len().min(p2.len()) - 1;
 
-				for i in start..=0 {
+				for i in 0..=0 {
 					let r = p1[i].0 as f32 - p2[i].0 as f32;
 					let g = p1[i].1 as f32 - p2[i].1 as f32;
 					let b = p1[i].2 as f32 - p2[i].2 as f32;

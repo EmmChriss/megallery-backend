@@ -13,9 +13,11 @@ use crate::layout::sort::{CompareDist, SignedDist};
 use crate::uuid_to_string_serialize;
 
 use self::dist::{DistanceFunction, DistanceFunctionVariants};
+use self::filter::Filter;
 use self::sort::{CompareFunction, CompareFunctionVariants};
 
 mod dist;
+mod filter;
 mod sort;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -71,9 +73,9 @@ pub struct ExpansionGridOptions {
 	compare: CompareFunctionVariants,
 }
 
-fn create_expansion_grid<C: CompareFunction>(
-	compare: C,
-	metadata: &mut [Image],
+// metadata is assumed to be sorted already
+fn create_expansion_grid(
+	metadata: &[Image],
 	opts: ExpansionGridOptions,
 ) -> Vec<Vec<Option<UuidString>>> {
 	let mut a: usize = (metadata.len() as f32).sqrt().ceil() as usize;
@@ -106,8 +108,6 @@ fn create_expansion_grid<C: CompareFunction>(
 		cost(*i1, *j1).partial_cmp(&cost(*i2, *j2)).unwrap()
 	});
 
-	metadata.sort_unstable_by(|i1, i2| compare.compare(i1, i2));
-
 	for (img, (i, j)) in metadata.iter().zip(positions) {
 		let i = (i - range_a.start) as usize;
 		let j = (j - range_b.start) as usize;
@@ -139,8 +139,8 @@ fn tsne<D: DistanceFunction + Send + Sync>(
 	_opts: TsneOptions,
 ) -> Vec<(UuidString, f32, f32)> {
 	let mut tsne = bhtsne::tSNE::new(metadata);
-	tsne.barnes_hut(0.5, move |a, b| f32::abs(dist.dist(a, b)));
-	// tsne.barnes_hut(0.1, move |a, b| dist.dist(a, b));
+	tsne.epochs(1000)
+		.barnes_hut(0.01, move |a, b| f32::abs(dist.dist(a, b)));
 
 	let mut res = tsne
 		.embedding()
@@ -175,6 +175,15 @@ pub enum LayoutOptions {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct LayoutRequest {
+	#[serde(flatten)]
+	opts: LayoutOptions,
+
+	filter: Option<Filter>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
 pub enum Layout {
 	Sort { data: Vec<UuidString> },
@@ -185,7 +194,7 @@ pub enum Layout {
 pub async fn get_layout(
 	Extension(db): DbExtension,
 	Path(collection_id): Path<Uuid>,
-	Json(layout): Json<LayoutOptions>,
+	Json(layout): Json<LayoutRequest>,
 ) -> Result<impl IntoResponse> {
 	measure_time::info_time!("calculating layout");
 
@@ -200,79 +209,57 @@ pub async fn get_layout(
 		));
 	}
 
+	// Get all images
 	let mut images = Image::get_all_for_collection(&db, collection_id).await?;
 
-	let buf: Result<Vec<u8>> = tokio::task::spawn_blocking(move || match layout {
+	// Perform filtering
+	if let Some(ref filter) = layout.filter {
+		images = images.into_iter().filter(|m| filter.filter(m)).collect();
+
+		if let Some(limit) = filter.limit {
+			images = Vec::from(&images[..limit]);
+		}
+	}
+
+	let resp = tokio::task::spawn_blocking(move || do_layout(layout, &mut images)).await??;
+	let msgp = rmp_serde::to_vec_named(&resp)?;
+
+	Ok(msgp)
+}
+
+fn do_layout(req: LayoutRequest, images: &mut [Image]) -> Result<Layout> {
+	match req.opts {
 		LayoutOptions::GridExpansion(opts) => {
-			let data = match opts.compare {
-				CompareFunctionVariants::SignedDist { dist } => match dist {
-					DistanceFunctionVariants::Palette => {
-						create_expansion_grid(SignedDist { dist: PaletteDist }, &mut images, opts)
-					}
-					DistanceFunctionVariants::PaletteCos => create_expansion_grid(
-						SignedDist {
-							dist: PaletteCosDist,
-						},
-						&mut images,
-						opts,
-					),
-					DistanceFunctionVariants::DateTime => {
-						create_expansion_grid(SignedDist { dist: DateTimeDist }, &mut images, opts)
-					}
+			// Sort images in another dispatch
+			do_layout(
+				LayoutRequest {
+					opts: LayoutOptions::Sort(SortOptions {
+						compare: opts.compare,
+					}),
+					filter: None,
 				},
-				CompareFunctionVariants::ComparativeDist { compared_to, dist } => {
-					let compared_to = images
-						.iter()
-						.find(|i| i.id == compared_to)
-						.cloned()
-						.ok_or(Error::NotFound(format!("image with id {}", compared_to)))?;
+				images,
+			)?;
 
-					match dist {
-						DistanceFunctionVariants::Palette => create_expansion_grid(
-							CompareDist {
-								compared_to,
-								dist: PaletteDist,
-							},
-							&mut images,
-							opts,
-						),
-						DistanceFunctionVariants::PaletteCos => create_expansion_grid(
-							CompareDist {
-								compared_to,
-								dist: PaletteCosDist,
-							},
-							&mut images,
-							opts,
-						),
-						DistanceFunctionVariants::DateTime => create_expansion_grid(
-							CompareDist {
-								compared_to,
-								dist: DateTimeDist,
-							},
-							&mut images,
-							opts,
-						),
-					}
-				}
-			};
+			let data = create_expansion_grid(images, opts);
 
-			rmp_serde::to_vec_named(&Layout::Grid { data }).map_err(Into::into)
+			Ok(Layout::Grid { data })
 		}
 		LayoutOptions::Sort(opts) => {
 			match opts.compare {
 				CompareFunctionVariants::SignedDist { dist } => match dist {
 					DistanceFunctionVariants::Palette => {
-						sort_by(SignedDist { dist: PaletteDist }, &mut images, opts)
+						sort_by(SignedDist { dist: PaletteDist }, images, opts)
 					}
 					DistanceFunctionVariants::PaletteCos => sort_by(
 						SignedDist {
 							dist: PaletteCosDist,
 						},
-						&mut images,
+						images,
 						opts,
 					),
 					DistanceFunctionVariants::DateTime => {
-						sort_by(SignedDist { dist: DateTimeDist }, &mut images, opts)
+						sort_by(SignedDist { dist: DateTimeDist }, images, opts)
 					}
 				},
 				CompareFunctionVariants::ComparativeDist { compared_to, dist } => {
@@ -287,7 +274,7 @@ pub async fn get_layout(
 								compared_to,
 								dist: PaletteDist,
 							},
-							&mut images,
+							images,
 							opts,
 						),
 						DistanceFunctionVariants::PaletteCos => sort_by(
@@ -295,7 +282,7 @@ pub async fn get_layout(
 								compared_to,
 								dist: PaletteCosDist,
 							},
-							&mut images,
+							images,
 							opts,
 						),
 						DistanceFunctionVariants::DateTime => sort_by(
@@ -303,7 +290,7 @@ pub async fn get_layout(
 								compared_to,
 								dist: DateTimeDist,
 							},
-							&mut images,
+							images,
 							opts,
 						),
 					}
@@ -315,19 +302,16 @@ pub async fn get_layout(
 				.map(|image| UuidString(image.id))
 				.collect_vec();
 
-			rmp_serde::to_vec_named(&Layout::Sort { data }).map_err(Into::into)
+			Ok(Layout::Sort { data })
 		}
 		LayoutOptions::Tsne(opts) => {
 			let data = match opts.dist {
-				DistanceFunctionVariants::Palette => tsne(PaletteDist, &mut images, opts),
-				DistanceFunctionVariants::PaletteCos => tsne(PaletteCosDist, &mut images, opts),
-				DistanceFunctionVariants::DateTime => tsne(DateTimeDist, &mut images, opts),
+				DistanceFunctionVariants::Palette => tsne(PaletteDist, images, opts),
+				DistanceFunctionVariants::PaletteCos => tsne(PaletteCosDist, images, opts),
+				DistanceFunctionVariants::DateTime => tsne(DateTimeDist, images, opts),
 			};
 
-			rmp_serde::to_vec_named(&Layout::Pos { data }).map_err(Into::into)
+			Ok(Layout::Pos { data })
 		}
-	})
-	.await?;
-
-	Ok(buf)
+	}
 }
