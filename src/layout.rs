@@ -2,6 +2,7 @@ use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::Json;
 use axum::{response::IntoResponse, Extension};
+use chrono::NaiveDateTime;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -164,12 +165,56 @@ fn tsne<D: DistanceFunction + Send + Sync>(
 	res
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TimeHistOptions {
+	pub resolution: TimeHistResolution,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeHistResolution {
+	Hour,
+	Day,
+	Week,
+	Month,
+	Year,
+}
+
+fn time_hist(metadata: &[Image], opts: TimeHistOptions) -> Vec<Vec<Option<UuidString>>> {
+	use TimeHistResolution::*;
+	let group_by_fn = match opts.resolution {
+		Hour => |dt: NaiveDateTime| dt.format("%Y-%j %H").to_string(),
+		Day => |dt: NaiveDateTime| dt.format("%Y-%j").to_string(),
+		Week => |dt: NaiveDateTime| dt.format("%Y-%W").to_string(),
+		Month => |dt: NaiveDateTime| dt.format("%Y-%m").to_string(),
+		Year => |dt: NaiveDateTime| dt.format("%Y").to_string(),
+	};
+
+	let mut with_metadata = metadata
+		.iter()
+		.filter_map(|img| img.metadata.date_time.map(|dt| (img.id, dt)))
+		.collect_vec();
+
+	with_metadata.sort_unstable_by_key(|(_, dt)| *dt);
+
+	let groups = with_metadata
+		.into_iter()
+		.group_by(|(_, dt)| group_by_fn(*dt));
+
+	groups
+		.into_iter()
+		.map(|(_, group)| group.map(|(id, _)| UuidString(id)).map(Some).collect_vec())
+		.collect_vec()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
 pub enum LayoutOptions {
 	Sort(SortOptions),
 	GridExpansion(ExpansionGridOptions),
+	TimeHist(TimeHistOptions),
 	Tsne(TsneOptions),
 }
 
@@ -186,9 +231,16 @@ pub struct LayoutRequest {
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
 pub enum Layout {
-	Sort { data: Vec<UuidString> },
-	Grid { data: Vec<Vec<Option<UuidString>>> },
-	Pos { data: Vec<(UuidString, f32, f32)> },
+	Sort {
+		data: Vec<UuidString>,
+	},
+	Grid {
+		data: Vec<Vec<Option<UuidString>>>,
+		invert: bool,
+	},
+	Pos {
+		data: Vec<(UuidString, f32, f32)>,
+	},
 }
 
 pub async fn get_layout(
@@ -243,8 +295,15 @@ fn do_layout(req: LayoutRequest, images: &mut [Image]) -> Result<Layout> {
 
 			let data = create_expansion_grid(images, opts);
 
-			Ok(Layout::Grid { data })
+			Ok(Layout::Grid {
+				data,
+				invert: false,
+			})
 		}
+		LayoutOptions::TimeHist(opts) => Ok(Layout::Grid {
+			data: time_hist(images, opts),
+			invert: true,
+		}),
 		LayoutOptions::Sort(opts) => {
 			match opts.compare {
 				CompareFunctionVariants::SignedDist { dist } => match dist {

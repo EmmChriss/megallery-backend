@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::{io::Cursor, path::PathBuf};
 
 use axum::{extract::Path, http::StatusCode, response::IntoResponse, Extension, Json};
 use fast_image_resize as resize;
@@ -14,6 +14,7 @@ use crate::{
 	atlas::regenerate_static_atlas,
 	db::{Collection, Db, DbExtension, Image, ImageFile, ImageFileKind, NewImage},
 	err::{Error, Result},
+	IMAGES_PATH,
 };
 
 lazy_static::lazy_static! {
@@ -252,7 +253,7 @@ pub async fn regenerate_metadata(db: &Db, id: Uuid) -> Result<()> {
 			let img_multiref = std::sync::Arc::new(tokio::sync::Mutex::new(image));
 
 			let img = img_multiref.clone();
-			let extract_palette = async move {
+			let extract_image = async move {
 				let mut img = img.lock_owned().await;
 
 				// extract color palette from largest thumbnail size
@@ -295,8 +296,8 @@ pub async fn regenerate_metadata(db: &Db, id: Uuid) -> Result<()> {
 			}
 			.await;
 
-			if let Some(e) = extract_palette.err() {
-				log::error!("extract palette: {:?}", e);
+			if let Some(e) = extract_image.err() {
+				log::error!("image extract: {:?}", e);
 			}
 
 			let img = img_multiref.clone();
@@ -382,6 +383,60 @@ pub async fn finalize_collection(
 
 	collection.finalized = true;
 	collection.save(&db).await?;
+
+	Ok(())
+}
+
+pub async fn duplicate(Extension(db): DbExtension, Path(collection_id): Path<Uuid>) -> Result<()> {
+	// make sure collection exists and is not finalized
+	let mut collection = Collection::get_by_id(&db, collection_id)
+		.await?
+		.ok_or(Error::NotFound("collection".into()))?;
+
+	if collection.finalized {
+		collection.finalized = false;
+		collection.save(&db).await?;
+	}
+
+	let images = Image::get_all_for_collection(&db, collection.id).await?;
+	let image_stream = futures_util::stream::iter(images.into_iter().map(Ok::<_, Error>));
+	image_stream
+		.try_for_each_concurrent(4, |image| {
+			let db = db.clone();
+			async move {
+				// create new image instance
+				let new_image = NewImage {
+					width: image.width,
+					height: image.height,
+					collection_id,
+				}
+				.insert_one(&db)
+				.await?;
+
+				let mut path = PathBuf::new();
+				path.push(IMAGES_PATH);
+				path.push(crate::uuid_to_string(&new_image.id));
+
+				tokio::fs::create_dir(path).await?;
+
+				let image_files = ImageFile::get_by_image_id(&db, image.id).await?;
+				for img_file in image_files {
+					let new_image_file = ImageFile {
+						image_id: new_image.id,
+						..img_file.clone()
+					};
+
+					let path = img_file.get_path();
+					let new_path = new_image_file.get_path();
+
+					tokio::fs::copy(path, new_path).await?;
+					new_image_file.insert_one(&db).await?;
+				}
+
+				Ok(())
+			}
+		})
+		.await?;
 
 	Ok(())
 }

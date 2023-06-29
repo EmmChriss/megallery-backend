@@ -158,7 +158,7 @@ impl NewImage {
 	}
 }
 
-#[derive(sqlx::Type, Debug)]
+#[derive(sqlx::Type, Debug, Clone)]
 #[repr(i32)]
 pub enum ImageFileKind {
 	Original = 1,
@@ -166,7 +166,7 @@ pub enum ImageFileKind {
 	Partial = 3,
 }
 
-#[derive(sqlx::FromRow, Debug)]
+#[derive(sqlx::FromRow, Debug, Clone)]
 pub struct ImageFile {
 	pub image_id: Uuid,
 	#[sqlx(try_from = "i32")]
@@ -193,6 +193,13 @@ impl ImageFile {
 		.execute(db)
 		.await
 		.map(|_| ())
+	}
+
+	pub async fn get_by_image_id(db: &Db, image_id: Uuid) -> sqlx::Result<Vec<Self>> {
+		sqlx::query_as("SELECT * FROM image_files WHERE image_id = $1")
+			.bind(image_id)
+			.fetch_all(db)
+			.await
 	}
 
 	pub async fn get_by_id(
