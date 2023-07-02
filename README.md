@@ -22,11 +22,7 @@ Framework for visualizing large numbers of images
       </ul>
     </li>
     <li><a href="#usage">Usage</a></li>
-    <li><a href="#roadmap">Roadmap</a></li>
-    <li><a href="#contributing">Contributing</a></li>
-    <li><a href="#license">License</a></li>
     <li><a href="#contact">Contact</a></li>
-    <li><a href="#acknowledgments">Acknowledgments</a></li>
   </ol>
 </details>
 
@@ -67,8 +63,9 @@ To get a local copy up and running follow these simple example steps.
   docker-compose up megallery-db
   ```
   You're also going to need to set the `DATABASE_PORT` and `DATABASE_URL` env variables accordingly. There is dotenv support.
-* Rust
-  You can get a Rust compiler installed using [rustup][https://rustup.rs/]
+* Rust:
+
+  You can get a Rust compiler installed using [rustup](https://rustup.rs/)
 
 ### Building
 
