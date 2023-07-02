@@ -141,7 +141,7 @@ fn tsne<D: DistanceFunction + Send + Sync>(
 ) -> Vec<(UuidString, f32, f32)> {
 	let mut tsne = bhtsne::tSNE::new(metadata);
 	tsne.epochs(1000)
-		.barnes_hut(0.01, move |a, b| f32::abs(dist.dist(a, b)));
+		.barnes_hut(0.5, move |a, b| f32::abs(dist.dist(a, b)));
 
 	let mut res = tsne
 		.embedding()
